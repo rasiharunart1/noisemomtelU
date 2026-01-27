@@ -1,0 +1,3 @@
+﻿
+   INFO  Migration [C:\Users\ACER\Documents\New folder (2)\noisemon\database\migrations\2026_01_19_062437_add_gain_to_devices_table.php] created successfully.  
+

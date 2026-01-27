@@ -1,0 +1,125 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer components {
+
+    /* Glassmorphism Card */
+    .glass-card {
+        @apply bg-white/10 backdrop-blur-lg border border-white/20 rounded-2xl shadow-xl;
+    }
+
+    .dark .glass-card {
+        @apply bg-gray-900/60 backdrop-blur-xl border-white/10 shadow-2xl ring-1 ring-white/5;
+    }
+
+    /* Telkom University Gradient Backgrounds */
+    .bg-gradient-telkom {
+        background: linear-gradient(135deg, #E31E24 0%, #8B0000 100%);
+    }
+
+    .bg-gradient-telkom-dark {
+        background: linear-gradient(135deg, #1a1a1a 0%, #0a0a0a 100%);
+    }
+
+    .bg-gradient-purple {
+        background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%);
+    }
+
+    .bg-gradient-dark {
+        background: linear-gradient(135deg, #1a1a1a 0%, #0a0a0a 100%);
+    }
+
+    /* Status Indicators */
+    .status-online {
+        @apply w-3 h-3 bg-emerald-400 rounded-full animate-pulse shadow-lg shadow-emerald-500/50;
+    }
+
+    .status-offline {
+        @apply w-3 h-3 bg-gray-400 rounded-full;
+    }
+
+    /* Metric Card */
+    .metric-card {
+        @apply glass-card p-4 hover:scale-105 transition-transform duration-300 hover:border-red-500/40;
+    }
+
+    /* Telkom University Button Styles */
+    .btn-primary {
+        @apply px-6 py-3 bg-gradient-to-r from-red-600 to-red-700 text-white rounded-lg font-semibold shadow-lg hover:shadow-xl hover:shadow-red-500/50 transition-all duration-300 hover:scale-105;
+    }
+
+    .btn-secondary {
+        @apply px-6 py-3 glass-card text-gray-800 dark:text-white rounded-lg font-semibold hover:scale-105 transition-all duration-300 hover:border-red-500/40;
+    }
+
+    /* Telkom Logo Text */
+    .telkom-logo-text {
+        @apply bg-gradient-to-r from-red-500 to-red-700 bg-clip-text text-transparent font-bold;
+    }
+}
+
+@layer utilities {
+
+    /* Custom Animations */
+    @keyframes float {
+
+        0%,
+        100% {
+            transform: translateY(0px);
+        }
+
+        50% {
+            transform: translateY(-10px);
+        }
+    }
+
+    @keyframes pulse-red {
+
+        0%,
+        100% {
+            box-shadow: 0 0 0 0 rgba(227, 30, 36, 0.7);
+        }
+
+        50% {
+            box-shadow: 0 0 0 10px rgba(227, 30, 36, 0);
+        }
+    }
+
+    .animate-float {
+        animation: float 3s ease-in-out infinite;
+    }
+
+    .animate-pulse-red {
+        animation: pulse-red 2s ease-in-out infinite;
+    }
+
+    /* Scrollbar Styling - Telkom Theme */
+    .scrollbar-telkom::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+    }
+
+    .scrollbar-telkom::-webkit-scrollbar-track {
+        background: rgba(0, 0, 0, 0.1);
+        border-radius: 4px;
+    }
+
+    .scrollbar-telkom::-webkit-scrollbar-thumb {
+        background: linear-gradient(180deg, #E31E24 0%, #8B0000 100%);
+        border-radius: 4px;
+    }
+
+    .scrollbar-telkom::-webkit-scrollbar-thumb:hover {
+        background: #E31E24;
+    }
+
+    .scrollbar-hide::-webkit-scrollbar {
+        display: none;
+    }
+
+    .scrollbar-hide {
+        -ms-overflow-style: none;
+        scrollbar-width: none;
+    }
+}
