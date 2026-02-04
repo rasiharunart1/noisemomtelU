@@ -24,6 +24,18 @@
                     @enderror
                 </div>
 
+                <!-- Description -->
+                <div class="mb-6">
+                    <label for="description" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        Keterangan
+                    </label>
+                    <textarea name="description" id="description" rows="3"
+                              class="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500 text-gray-900 dark:text-white placeholder-gray-500">{{ old('description') }}</textarea>
+                    @error('description')
+                        <p class="mt-1 text-sm text-red-600 dark:text-red-400">{{ $message }}</p>
+                    @enderror
+                </div>
+
                 <!-- Location -->
                 <div class="mb-6 grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>

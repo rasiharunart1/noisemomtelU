@@ -75,10 +75,11 @@ class MqttListenerCommand extends Command
 
             // Register loop handler for periodic tasks
             $lastCheck = time();
-            $mqtt->registerLoopEventHandler(function (MqttClient $client, float $elapsedTime) use (&$lastCheck) {
+            $mqtt->registerLoopEventHandler(function (MqttClient $client, float $elapsedTime) use (&$lastCheck, $topic) {
                 // Check every 10 seconds
                 if (time() - $lastCheck >= 10) {
-                    $offlineThreshold = now()->subSeconds(30); // Consider offline if no data for 30s
+                    $offlineThresholdSeconds = (int) Setting::get('device_offline_threshold', 30);
+                    $offlineThreshold = now()->subSeconds($offlineThresholdSeconds);
                     
                     // Get devices that are about to go offline
                     $offlineDevices = Device::where('status', 'online')
@@ -213,20 +214,14 @@ class MqttListenerCommand extends Command
             
             // Audio metrics
             'rms' => $this->sanitizeValue($audio['rms'] ?? 0, 10, 6),
-            'db_spl' => (float) ($audio['db_spl'] ?? 0), // float is safer
-            'peak_amplitude' => $this->sanitizeValue($audio['peak_amplitude'] ?? 0, 10, 6),
-            'noise_floor' => $this->sanitizeValue($audio['noise_floor'] ?? 0, 10, 6),
-            'gain' => $this->sanitizeValue($audio['gain'] ?? 1, 10, 4),
+            'db_spl' => (float) ($audio['db_spl'] ?? 0),
             
             // FFT metrics
             'peak_frequency' => $this->sanitizeValue($fft['peak_frequency'] ?? 0, 12, 4),
-            'peak_magnitude' => $this->sanitizeValue($fft['peak_magnitude'] ?? 0, 12, 4),
             'total_energy' => $this->sanitizeValue($fft['total_energy'] ?? 0, 16, 4),
             'band_low' => $this->sanitizeValue($fft['band_energy']['low'] ?? 0, 14, 4),
             'band_mid' => $this->sanitizeValue($fft['band_energy']['mid'] ?? 0, 14, 4),
             'band_high' => $this->sanitizeValue($fft['band_energy']['high'] ?? 0, 14, 4),
-            'spectral_centroid' => $this->sanitizeValue($fft['spectral_centroid'] ?? 0, 12, 4),
-            'zcr' => $this->sanitizeValue($fft['zcr'] ?? 0, 8, 6),
             
             'created_at' => now(),
         ]);

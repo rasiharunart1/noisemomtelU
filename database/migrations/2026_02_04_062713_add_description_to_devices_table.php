@@ -11,8 +11,8 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::table('fft_logs', function (Blueprint $table) {
-            $table->decimal('db_spl', 8, 2)->after('rms')->nullable();
+        Schema::table('devices', function (Blueprint $table) {
+            $table->text('description')->nullable()->after('name');
         });
     }
 
@@ -21,8 +21,8 @@ return new class extends Migration
      */
     public function down(): void
     {
-        Schema::table('fft_logs', function (Blueprint $table) {
-            $table->dropColumn('db_spl');
+        Schema::table('devices', function (Blueprint $table) {
+            $table->dropColumn('description');
         });
     }
 };

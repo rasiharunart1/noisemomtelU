@@ -136,6 +136,49 @@
                     <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">How often to save FFT data to database (1-300 seconds)</p>
                 </div>
 
+                <!-- Device Offline Threshold -->
+                <div class="mb-6">
+                    <label for="device_offline_threshold" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        Device Offline Threshold (seconds)
+                    </label>
+                    <input type="number" name="device_offline_threshold" id="device_offline_threshold" value="{{ old('device_offline_threshold', $settings['device_offline_threshold']) }}" min="10" max="300"
+                           class="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg focus:ring-2 focus:ring-red-500 text-gray-900 dark:text-white">
+                    @error('device_offline_threshold')
+                        <p class="mt-1 text-sm text-red-600 dark:text-red-400">{{ $message }}</p>
+                    @enderror
+                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">Device status changes to offline if no data received for this duration (10-300 seconds)</p>
+                </div>
+
+                <hr class="my-8 border-white/10">
+
+                <h3 class="text-xl font-bold text-gray-900 dark:text-white mb-6">Automatic Log Archival</h3>
+                
+                <div class="glass-card p-6 rounded-xl bg-orange-500/5 border border-orange-500/10 mb-6">
+                    <div class="flex items-center justify-between mb-4">
+                        <div>
+                            <h4 class="font-bold text-gray-900 dark:text-white">Daily Auto-Archive</h4>
+                            <p class="text-xs text-gray-500 dark:text-gray-400">Automatically export to CSV and clear database</p>
+                        </div>
+                        <label class="relative inline-flex items-center cursor-pointer">
+                            <input type="hidden" name="log_auto_archive_enabled" value="0">
+                            <input type="checkbox" name="log_auto_archive_enabled" value="1" class="sr-only peer" 
+                                {{ $settings['log_auto_archive_enabled'] ? 'checked' : '' }}>
+                            <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-orange-300 dark:peer-focus:ring-orange-800 rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-orange-500"></div>
+                        </label>
+                    </div>
+
+                    <div class="mb-2">
+                        <label for="log_auto_archive_time" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                            Archive Time (Daily)
+                        </label>
+                        <input type="time" name="log_auto_archive_time" id="log_auto_archive_time" value="{{ $settings['log_auto_archive_time'] }}"
+                               class="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg focus:ring-2 focus:ring-orange-500 text-gray-900 dark:text-white">
+                         @error('log_auto_archive_time')
+                            <p class="mt-1 text-sm text-red-600 dark:text-red-400">{{ $message }}</p>
+                        @enderror
+                    </div>
+                </div>
+
                 <!-- Info Box -->
                 <div class="bg-blue-500/10 border border-blue-500/30 rounded-lg p-4 mb-6">
                     <div class="flex items-start">

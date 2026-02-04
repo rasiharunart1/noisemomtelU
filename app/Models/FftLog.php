@@ -9,17 +9,11 @@ class FftLog extends Model
         'device_id',
         'rms',
         'db_spl',
-        'peak_amplitude',
-        'noise_floor',
-        'gain',
         'peak_frequency',
-        'peak_magnitude',
         'total_energy',
         'band_low',
         'band_mid',
         'band_high',
-        'spectral_centroid',
-        'zcr',
         'created_at',
     ];
     protected $casts = [

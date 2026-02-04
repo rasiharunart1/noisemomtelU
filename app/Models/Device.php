@@ -14,6 +14,7 @@ class Device extends Model
         'device_id',
         'token',
         'name',
+        'description',
         'mqtt_topic',
         'status',
         'last_seen',
@@ -47,6 +48,11 @@ class Device extends Model
     public function recordings(): HasMany
     {
         return $this->hasMany(AudioRecording::class);
+    }
+
+    public function schedules(): HasMany
+    {
+        return $this->hasMany(RecordingSchedule::class);
     }
 
     public function scopeOnline($query)

@@ -18,6 +18,9 @@ class SettingController extends Controller
             'mqtt_username' => Setting::get('mqtt_username', env('MQTT_USERNAME')),
             'mqtt_topic_pattern' => Setting::get('mqtt_topic_pattern', env('MQTT_TOPIC_PATTERN', 'audio/+/data')),
             'fft_logging_interval' => Setting::get('fft_logging_interval', env('FFT_LOGGING_INTERVAL', 10)),
+            'log_auto_archive_enabled' => Setting::get('log_auto_archive_enabled', '0'),
+            'log_auto_archive_time' => Setting::get('log_auto_archive_time', '00:00'),
+            'device_offline_threshold' => Setting::get('device_offline_threshold', '30'),
         ];
 
         return view('settings', compact('settings'));
@@ -35,6 +38,9 @@ class SettingController extends Controller
             'mqtt_password' => 'nullable|string',
             'mqtt_topic_pattern' => 'required|string',
             'fft_logging_interval' => 'required|integer|min:1|max:300',
+            'log_auto_archive_enabled' => 'nullable|boolean',
+            'log_auto_archive_time' => 'nullable|date_format:H:i',
+            'device_offline_threshold' => 'nullable|integer|min:10|max:300',
         ]);
 
         foreach ($validated as $key => $value) {
@@ -57,6 +63,9 @@ class SettingController extends Controller
             'mqtt_port' => Setting::get('mqtt_port', env('MQTT_PORT', 8883)),
             'mqtt_topic_pattern' => Setting::get('mqtt_topic_pattern', env('MQTT_TOPIC_PATTERN', 'audio/+/data')),
             'fft_logging_interval' => Setting::get('fft_logging_interval', env('FFT_LOGGING_INTERVAL', 10)),
+            'log_auto_archive_enabled' => (bool) Setting::get('log_auto_archive_enabled', false),
+            'log_auto_archive_time' => Setting::get('log_auto_archive_time', '00:00'),
+            'device_offline_threshold' => (int) Setting::get('device_offline_threshold', 30),
         ]);
     }
     /**

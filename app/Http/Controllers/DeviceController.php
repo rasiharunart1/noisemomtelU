@@ -45,6 +45,7 @@ class DeviceController extends Controller
     {
         $validated = $request->validate([
             'name' => 'required|string|max:255',
+            'description' => 'nullable|string',
             'latitude' => 'nullable|numeric|between:-90,90',
             'longitude' => 'nullable|numeric|between:-180,180',
         ]);
@@ -63,6 +64,7 @@ class DeviceController extends Controller
             'id' => Str::uuid(),
             'device_id' => $deviceId,
             'name' => $validated['name'],
+            'description' => $validated['description'] ?? null,
             'mqtt_topic' => $mqttTopic,
             'status' => 'offline',
             'latitude' => $validated['latitude'] ?? null,
@@ -88,7 +90,11 @@ class DeviceController extends Controller
             ->orderBy('created_at', 'desc')
             ->get();
 
-        return view('devices.show', compact('device', 'recentLogs', 'recordings'));
+        $schedules = $device->schedules()
+            ->orderBy('start_time', 'asc')
+            ->get();
+
+        return view('devices.show', compact('device', 'recentLogs', 'recordings', 'schedules'));
     }
 
     /**
@@ -106,12 +112,14 @@ class DeviceController extends Controller
     {
         $validated = $request->validate([
             'name' => 'required|string|max:255',
+            'description' => 'nullable|string',
             'latitude' => 'nullable|numeric|between:-90,90',
             'longitude' => 'nullable|numeric|between:-180,180',
         ]);
 
         $device->update([
             'name' => $validated['name'],
+            'description' => $validated['description'],
             'latitude' => $validated['latitude'] ?? null,
             'longitude' => $validated['longitude'] ?? null,
         ]);

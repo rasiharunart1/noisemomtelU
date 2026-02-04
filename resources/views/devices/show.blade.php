@@ -383,7 +383,142 @@
         </div>
     </div>
 
-    <!-- WiFi Management -->
+    <!-- Scheduled Recordings -->
+    <div class="glass-card p-6 rounded-2xl mb-8 relative overflow-hidden" x-data="{ scheduleModalOpen: false }">
+        <div class="absolute top-0 right-0 w-64 h-64 bg-emerald-500/5 rounded-full blur-3xl -mr-32 -mt-32"></div>
+
+        <div class="relative z-10">
+            <div class="flex items-center justify-between mb-6">
+                <div class="flex items-center space-x-3">
+                    <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-emerald-600 to-emerald-800 flex items-center justify-center shadow-lg shadow-emerald-500/30">
+                        <svg class="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                    </div>
+                    <div>
+                        <h3 class="text-lg font-bold text-gray-900 dark:text-white">Scheduled Recordings</h3>
+                        <p class="text-xs text-gray-500 dark:text-gray-400">Automate recurring recordings</p>
+                    </div>
+                </div>
+                <button @click="scheduleModalOpen = true" class="px-4 py-2 bg-emerald-600 text-white rounded-lg font-bold text-xs hover:bg-emerald-700 transition-colors shadow-lg shadow-emerald-500/20 flex items-center">
+                    <svg class="w-4 h-4 mr-1.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                    </svg>
+                    New Schedule
+                </button>
+            </div>
+
+            <!-- Schedules List -->
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm text-left text-gray-500 dark:text-gray-400">
+                    <thead class="text-xs text-gray-700 uppercase bg-gray-50 dark:bg-white/5 dark:text-gray-300">
+                        <tr>
+                            <th scope="col" class="px-6 py-3 rounded-l-lg">Time Window</th>
+                            <th scope="col" class="px-6 py-3">Interval</th>
+                            <th scope="col" class="px-6 py-3">Duration</th>
+                            <th scope="col" class="px-6 py-3">Status</th>
+                            <th scope="col" class="px-6 py-3 rounded-r-lg text-right">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @forelse($schedules as $schedule)
+                        <tr class="bg-white dark:bg-transparent border-b dark:border-white/5 hover:bg-gray-50 dark:hover:bg-white/5 transition-colors">
+                            <td class="px-6 py-4 font-medium text-gray-900 dark:text-white">
+                                <div>{{ $schedule->start_time->format('M d, H:i') }}</div>
+                                <div class="text-xs text-gray-500">to {{ $schedule->end_time->format('M d, H:i') }}</div>
+                            </td>
+                            <td class="px-6 py-4">
+                                Every {{ $schedule->interval_minutes }} mins
+                            </td>
+                            <td class="px-6 py-4">
+                                {{ $schedule->duration_seconds }} sec
+                            </td>
+                            <td class="px-6 py-4">
+                                <span class="px-2 py-1 text-xs font-semibold rounded-full 
+                                    {{ $schedule->status === 'active' ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-400' : '' }}
+                                    {{ $schedule->status === 'pending' ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400' : '' }}
+                                    {{ $schedule->status === 'completed' ? 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300' : '' }}
+                                ">
+                                    {{ ucfirst($schedule->status) }}
+                                </span>
+                                @if($schedule->last_run_at)
+                                <div class="text-[10px] mt-1 text-gray-500">Last: {{ $schedule->last_run_at->diffForHumans() }}</div>
+                                @endif
+                            </td>
+                            <td class="px-6 py-4 text-right">
+                                <form action="{{ route('schedules.destroy', $schedule) }}" method="POST" onsubmit="return confirm('Cancel this schedule?')">
+                                    @csrf @method('DELETE')
+                                    <button type="submit" class="text-red-500 hover:text-red-700 font-medium">Cancel</button>
+                                </form>
+                            </td>
+                        </tr>
+                        @empty
+                        <tr>
+                            <td colspan="5" class="px-6 py-8 text-center text-gray-500 italic">No schedules active</td>
+                        </tr>
+                        @endforelse
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- New Schedule Modal -->
+        <template x-teleport="body">
+            <div x-show="scheduleModalOpen" 
+                 x-transition:enter="transition ease-out duration-300"
+                 x-transition:enter-start="opacity-0 transform scale-95"
+                 x-transition:enter-end="opacity-100 transform scale-100"
+                 x-transition:leave="transition ease-in duration-200"
+                 x-transition:leave-start="opacity-100 transform scale-100"
+                 x-transition:leave-end="opacity-0 transform scale-95"
+                 class="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-md p-4">
+                
+                <div @click.away="scheduleModalOpen = false" class="bg-white dark:bg-gray-900 w-full max-w-lg rounded-[2rem] shadow-2xl border border-gray-200 dark:border-white/10 p-8 relative overflow-hidden">
+                    <div class="absolute top-0 right-0 w-32 h-32 bg-emerald-500/10 rounded-full blur-2xl -mr-16 -mt-16"></div>
+                    
+                    <h3 class="text-xl font-bold text-gray-900 dark:text-white mb-6 relative z-10">Create Schedule</h3>
+                    
+                    <form action="{{ route('devices.schedules.store', $device) }}" method="POST" class="space-y-4 relative z-10">
+                        @csrf
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">Start Time</label>
+                                <input type="datetime-local" name="start_time" required
+                                       class="w-full px-4 py-3 bg-gray-50 dark:bg-white/5 border border-gray-200 dark:border-white/10 rounded-xl focus:ring-2 focus:ring-emerald-500 dark:text-white">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">End Time</label>
+                                <input type="datetime-local" name="end_time" required
+                                       class="w-full px-4 py-3 bg-gray-50 dark:bg-white/5 border border-gray-200 dark:border-white/10 rounded-xl focus:ring-2 focus:ring-emerald-500 dark:text-white">
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">Interval (Minutes)</label>
+                                <input type="number" name="interval_minutes" min="1" value="30" required
+                                       class="w-full px-4 py-3 bg-gray-50 dark:bg-white/5 border border-gray-200 dark:border-white/10 rounded-xl focus:ring-2 focus:ring-emerald-500 dark:text-white">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">Duration (Seconds)</label>
+                                <input type="number" name="duration_seconds" min="5" max="300" value="30" required
+                                       class="w-full px-4 py-3 bg-gray-50 dark:bg-white/5 border border-gray-200 dark:border-white/10 rounded-xl focus:ring-2 focus:ring-emerald-500 dark:text-white">
+                            </div>
+                        </div>
+
+                        <div class="pt-4 flex space-x-3">
+                            <button type="button" @click="scheduleModalOpen = false" class="flex-1 px-4 py-3 bg-gray-100 dark:bg-white/5 text-gray-700 dark:text-gray-300 rounded-xl font-bold hover:bg-gray-200 transition-colors">
+                                Cancel
+                            </button>
+                            <button type="submit" class="flex-1 px-4 py-3 bg-emerald-600 text-white rounded-xl font-bold hover:bg-emerald-700 shadow-lg shadow-emerald-500/30 transition-all hover:scale-[1.02]">
+                                Create Schedule
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </template>
+    </div>
     <div class="glass-card p-6 rounded-2xl mb-8 relative overflow-hidden group" x-data="{ wifiModalOpen: false }">
         <div class="absolute top-0 right-0 w-64 h-64 bg-blue-500/5 rounded-full blur-3xl -mr-32 -mt-32 transition-all group-hover:bg-blue-500/10"></div>
         

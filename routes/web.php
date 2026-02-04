@@ -5,6 +5,7 @@ use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DeviceController;
 use App\Http\Controllers\FftLogController;
 use App\Http\Controllers\SettingController;
+use App\Http\Controllers\ScheduleController;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/', function () {
@@ -24,6 +25,10 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::post('/devices/{device}/wifi/reset', [DeviceController::class, 'resetWifi'])->name('devices.wifi.reset');
     Route::post('/devices/{device}/wifi/update', [DeviceController::class, 'updateWifi'])->name('devices.wifi.update');
     
+    // Scheduled Recordings
+    Route::post('/devices/{device}/schedules', [ScheduleController::class, 'store'])->name('devices.schedules.store');
+    Route::delete('/schedules/{schedule}', [ScheduleController::class, 'destroy'])->name('schedules.destroy');
+    
     // Audio Recordings Download
     Route::get('/recordings/{recording}/download', [DeviceController::class, 'downloadRecording'])->name('recordings.download');
     Route::post('/recordings/bulk-download', [DeviceController::class, 'bulkDownload'])->name('recordings.bulk-download');
@@ -31,6 +36,8 @@ Route::middleware(['auth', 'verified'])->group(function () {
     // FFT Logs
     Route::get('/logs/fft', [FftLogController::class, 'index'])->name('logs.fft');
     Route::get('/logs/fft/export', [FftLogController::class, 'export'])->name('logs.fft.export');
+    Route::get('/logs/fft/archives/{filename}', [FftLogController::class, 'downloadArchive'])->name('logs.fft.download_archive');
+    Route::post('/logs/fft/archives/bulk-download', [FftLogController::class, 'bulkDownloadArchives'])->name('logs.fft.bulk_download');
     Route::delete('/logs/fft/reset', [FftLogController::class, 'destroyAll'])->name('logs.fft.destroy_all');
     
     // Settings

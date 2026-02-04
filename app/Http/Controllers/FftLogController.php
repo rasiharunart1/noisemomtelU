@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Device;
 use App\Models\FftLog;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
 
 class FftLogController extends Controller
 {
@@ -43,7 +44,23 @@ class FftLogController extends Controller
 
         $devices = Device::orderBy('device_id')->get();
 
-        return view('logs.fft', compact('logs', 'devices'));
+        $archives = [];
+        if (Storage::exists('exports/logs')) {
+            $files = Storage::files('exports/logs');
+            foreach ($files as $file) {
+                // $file is 'exports/logs/filename.csv'
+                $archives[] = [
+                    'filename' => basename($file),
+                    'path' => $file,
+                    'size' => Storage::size($file),
+                    'last_modified' => Storage::lastModified($file),
+                ];
+            }
+            // Sort by modified date desc
+            usort($archives, fn($a, $b) => $b['last_modified'] <=> $a['last_modified']);
+        }
+
+        return view('logs.fft', compact('logs', 'devices', 'archives'));
     }
 
     /**
@@ -152,5 +169,54 @@ class FftLogController extends Controller
 
         return redirect()->route('logs.fft')
             ->with('success', 'All FFT logs have been cleared successfully.');
+    }
+
+    /**
+     * Download archived log CSV
+     */
+    public function downloadArchive($filename)
+    {
+        if (!Storage::exists('exports/logs/' . $filename)) {
+            return redirect()->back()->with('error', 'Archive file not found.');
+        }
+
+        return Storage::download('exports/logs/' . $filename);
+    }
+
+    /**
+     * Bulk download archived logs as ZIP
+     */
+    public function bulkDownloadArchives(Request $request)
+    {
+        $files = $request->input('files', []);
+        
+        if (empty($files)) {
+            return redirect()->back()->with('error', 'No files selected for download.');
+        }
+
+        // Create a temporary ZIP file
+        $zipFilename = 'logs_archive_' . now()->format('Y-m-d_His') . '.zip';
+        $zipPath = storage_path('app/temp/' . $zipFilename);
+        
+        // Ensure temp directory exists
+        if (!file_exists(storage_path('app/temp'))) {
+            mkdir(storage_path('app/temp'), 0755, true);
+        }
+
+        $zip = new ZipArchive();
+        if ($zip->open($zipPath, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+            return redirect()->back()->with('error', 'Failed to create ZIP file.');
+        }
+
+        foreach ($files as $filename) {
+            $filePath = 'exports/logs/' . $filename;
+            if (Storage::exists($filePath)) {
+                $zip->addFile(Storage::path($filePath), $filename);
+            }
+        }
+
+        $zip->close();
+
+        return response()->download($zipPath, $zipFilename)->deleteFileAfterSend(true);
     }
 }
