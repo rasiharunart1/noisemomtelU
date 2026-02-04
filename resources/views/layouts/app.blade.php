@@ -6,6 +6,7 @@
     <meta name="csrf-token" content="{{ csrf_token() }}">
 
     <title>{{ $title ?? config('app.name', 'Audio FFT Dashboard') }}</title>
+<link rel="icon" href="{{ asset('favicon.ico') }}">
 
     <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.bunny.net">
@@ -23,12 +24,28 @@
     
     @stack('styles')
 </head>
-<body class="font-sans antialiased" x-init="$watch('darkMode', val => localStorage.setItem('darkMode', val))" x-data="{ showLogoutModal: false, showSubscriptionModal: false }" @subscription-expired.window="showSubscriptionModal = true; document.body.style.overflow = 'hidden'">
+<body class="font-sans antialiased" x-init="$watch('darkMode', val => localStorage.setItem('darkMode', val))" x-data="{ showLogoutModal: false, mobileMenuOpen: false }">
     <div class="min-h-screen transition-colors duration-300" 
          x-bind:class="darkMode ? 'bg-gradient-dark' : 'bg-gradient-purple'">
         
+        <!-- Mobile Sidebar Backdrop -->
+        <div x-show="mobileMenuOpen" 
+             @click="mobileMenuOpen = false"
+             x-transition:enter="transition ease-out duration-300"
+             x-transition:enter-start="opacity-0"
+             x-transition:enter-end="opacity-100"
+             x-transition:leave="transition ease-in duration-200"
+             x-transition:leave-start="opacity-100"
+             x-transition:leave-end="opacity-0"
+             class="fixed inset-0 z-30 bg-black/60 backdrop-blur-sm sm:hidden" 
+             style="display: none;">
+        </div>
+
         <!-- Sidebar -->
-        <aside class="fixed left-0 top-0 z-40 h-screen w-64 transition-transform -translate-x-full sm:translate-x-0" aria-label="Sidebar">
+        <aside class="fixed left-0 top-0 z-40 h-screen w-64 transition-transform sm:translate-x-0"
+               x-bind:class="mobileMenuOpen ? 'translate-x-0' : '-translate-x-full'"
+               @click.away="if(window.innerWidth < 640) mobileMenuOpen = false"
+               aria-label="Sidebar">
             <!-- Floating Container -->
             <div class="h-full p-4">
                 <!-- Glass Card Content -->
@@ -46,6 +63,13 @@
                             </div>
                         </div>
                         
+                        <!-- Mobile Close Button -->
+                        <button @click="mobileMenuOpen = false" class="sm:hidden p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-white/10">
+                            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                        </button>
+
                         <!-- Dark Mode Toggle -->
                         <button @click="darkMode = !darkMode" class="p-2 rounded-lg glass-card hover:scale-110 transition-transform hover:border-red-500/40 text-gray-700 dark:text-white flex-shrink-0 ml-1">
                             <svg x-show="!darkMode" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" /></svg>
@@ -145,9 +169,17 @@
             <div class="p-4">
                 <div class="glass-card p-4 mb-4 rounded-2xl">
                     <div class="flex items-center justify-between">
-                        <h2 class="text-2xl font-bold text-gray-900 dark:text-white">
-                            {{ $header ?? 'Dashboard' }}
-                        </h2>
+                        <div class="flex items-center">
+                            <!-- Mobile Menu Toggle -->
+                            <button @click="mobileMenuOpen = true" class="sm:hidden mr-3 p-2 rounded-lg text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/10">
+                                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+                                </svg>
+                            </button>
+                            <h2 class="text-2xl font-bold text-gray-900 dark:text-white">
+                                {{ $header ?? 'Dashboard' }}
+                            </h2>
+                        </div>
                         
                         <div class="flex items-center space-x-4">
                             <!-- Connection Status -->
@@ -219,79 +251,6 @@
         </div>
     </div>
 
-    <!-- Subscription Expired Modal -->
-    <div x-show="showSubscriptionModal" 
-         class="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-xl"
-         x-transition:enter="transition ease-out duration-500"
-         x-transition:enter-start="opacity-0 scale-90"
-         x-transition:enter-end="opacity-100 scale-100"
-         style="display: none;">
-        <div class="glass-card w-full max-w-lg p-8 rounded-[2.5rem] border-2 border-red-500/50 shadow-[0_0_50px_rgba(239,68,68,0.3)] bg-white/10 dark:bg-black/40 text-center relative overflow-hidden">
-            <!-- Decorative Orbs -->
-            <div class="absolute -top-10 -left-10 w-32 h-32 bg-red-600/20 blur-3xl rounded-full"></div>
-            <div class="absolute -bottom-10 -right-10 w-32 h-32 bg-red-600/20 blur-3xl rounded-full"></div>
-
-            <div class="relative z-10">
-                <div class="w-20 h-20 rounded-full bg-red-600/20 flex items-center justify-center text-red-600 mx-auto mb-6 shadow-lg shadow-red-500/20">
-                    <svg class="w-10 h-10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                </div>
-                
-                <h2 class="text-3xl font-black text-white mb-2 tracking-tight">LAYANAN TERHENTI</h2>
-                <div class="w-16 h-1 bg-gradient-to-r from-transparent via-red-600 to-transparent mx-auto mb-6"></div>
-                
-                <p class="text-gray-300 text-lg leading-relaxed mb-8">
-                    Masa aktif layanan aplikasi Anda telah <span class="text-red-500 font-bold">berakhir</span>. Untuk terus menggunakan fitur pemantauan Noisemon, silakan lakukan perpanjangan.
-                </p>
-
-                <div class="glass-card p-6 rounded-2xl bg-white/5 border border-white/10 mb-8">
-                    <p class="text-sm text-gray-400 mb-1">Status Langganan</p>
-                    <p class="text-xl font-bold text-red-400 uppercase tracking-widest">EXPIRED</p>
-                </div>
-
-                <a href="https://mdpower.io/contact" target="_blank"
-                   class="inline-flex items-center justify-center w-full px-8 py-4 rounded-2xl bg-red-600 hover:bg-red-500 text-white font-black text-lg transition-all shadow-[0_10px_20px_rgba(220,38,38,0.4)] hover:-translate-y-1">
-                    <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                    </svg>
-                    Hubungi Admin
-                </a>
-                
-                <p class="mt-6 text-xs text-gray-500">Device Code: <span class="text-gray-400 font-mono">{{ env('MASTER_DEVICE_CODE') }}</span></p>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        document.addEventListener('DOMContentLoaded', function() {
-            const masterCode = "{{ env('MASTER_DEVICE_CODE') }}";
-            if (!masterCode) return;
-
-            const checkSubscription = async () => {
-                try {
-                    const response = await fetch(`https://diklat.mdpower.io/api/devices/${masterCode}/status`);
-                    const data = await response.json();
-                    
-                    if (data.success && data.subscription_expires_at) {
-                        const expiresAt = new Date(data.subscription_expires_at);
-                        const now = new Date();
-                        
-                        if (expiresAt <= now) {
-                            // Dispatch event to window for Alpine listener
-                            window.dispatchEvent(new CustomEvent('subscription-expired'));
-                        }
-                    }
-                } catch (err) {
-                    console.error('Subscription verification failed:', err);
-                }
-            };
-
-            // Check every 1 minute
-            checkSubscription();
-            setInterval(checkSubscription, 60000);
-        });
-    </script>
 
     @stack('scripts')
 </body>

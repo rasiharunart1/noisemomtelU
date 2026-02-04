@@ -846,16 +846,19 @@
                     // return; // REMOVED: Allow processing other data even if status is present
                 }
 
-                // Update Big Numbers
+                // Update Big Numbers (Safety Checks Added)
                 if (data.audio) {
-                    document.getElementById('current-rms').innerText = data.audio.rms.toFixed(4);
-                    if (data.audio.db_spl) {
-                        document.getElementById('current-db-spl').innerText = data.audio.db_spl.toFixed(1);
+                    if (data.audio.rms !== undefined && data.audio.rms !== null) {
+                        document.getElementById('current-rms').innerText = Number(data.audio.rms).toFixed(4);
+                    }
+                    if (data.audio.db_spl !== undefined && data.audio.db_spl !== null) {
+                        document.getElementById('current-db-spl').innerText = Number(data.audio.db_spl).toFixed(1);
                     }
                 }
                 if (data.fft) {
-                    document.getElementById('current-freq').innerText = data.fft.peak_frequency.toFixed(0);
-                    // document.getElementById('current-energy').innerText = Math.round(data.fft.total_energy); // Removed from header
+                    if (data.fft.peak_frequency !== undefined && data.fft.peak_frequency !== null) {
+                        document.getElementById('current-freq').innerText = Number(data.fft.peak_frequency).toFixed(0);
+                    }
                 }
                 document.getElementById('last-seen').innerText = "Just now";
 
@@ -886,19 +889,6 @@
                     ];
                     bandChart.update();
 
-                    // Update Table
-                    const tbody = document.getElementById('logs-table-body');
-                    const row = `
-                        <tr class="animate-pulse bg-red-50/20">
-                            <td class="px-6 py-4 text-gray-900 dark:text-white font-mono">${now}</td>
-                            <td class="px-6 py-4 text-right font-black text-red-600 dark:text-red-400">${(data.audio.db_spl || 0).toFixed(1)} dB</td>
-                            <td class="px-6 py-4 text-right text-gray-700 dark:text-gray-300">${data.audio.rms.toFixed(4)}</td>
-                            <td class="px-6 py-4 text-right text-gray-700 dark:text-gray-300">${data.fft.peak_frequency.toFixed(0)} Hz</td>
-                            <td class="px-6 py-4 text-right text-gray-500 dark:text-gray-400">${Math.round(data.fft.total_energy)}</td>
-                        </tr>
-                    `;
-                    tbody.insertAdjacentHTML('afterbegin', row);
-                    if (tbody.children.length > 10) tbody.removeChild(tbody.lastElementChild);
                 }
 
             } catch (e) {
@@ -998,16 +988,22 @@
         });
 
         function updateRecordingStatus(status) {
-            if (status === 'recording') {
-                recordingStatusText.innerText = 'Recording...';
-                recordingStatusDot.className = 'w-3 h-3 rounded-full bg-red-500 animate-pulse';
+            if (status === 'recording' || status === 'uploading') {
+                if(status === 'recording') {
+                     recordingStatusText.innerText = 'Recording...';
+                     recordingStatusDot.className = 'w-3 h-3 rounded-full bg-red-500 animate-pulse';
+                } else {
+                     recordingStatusText.innerText = 'Uploading...';
+                     recordingStatusDot.className = 'w-3 h-3 rounded-full bg-blue-500 animate-pulse';
+                }
                 startRecordingBtn.disabled = true;
-                stopRecordingBtn.disabled = false;
+                stopRecordingBtn.disabled = (status === 'uploading'); // Disable stop if uploading
             } else {
                 recordingStatusText.innerText = 'Idle';
                 recordingStatusDot.className = 'w-3 h-3 rounded-full bg-gray-400';
+                
                 // Only enable start button if device is online
-                const deviceOnline = document.getElementById('status-text').innerText.toLowerCase() === 'online';
+                const deviceOnline = document.getElementById('status-text').innerText.toLowerCase().includes('online');
                 startRecordingBtn.disabled = !deviceOnline;
                 stopRecordingBtn.disabled = true;
             }

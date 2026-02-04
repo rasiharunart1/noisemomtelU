@@ -142,4 +142,15 @@ class FftLogController extends Controller
             'spectral_centroid' => $logs->pluck('spectral_centroid'),
         ]);
     }
+
+    /**
+     * Delete all FFT logs
+     */
+    public function destroyAll()
+    {
+        FftLog::truncate();
+
+        return redirect()->route('logs.fft')
+            ->with('success', 'All FFT logs have been cleared successfully.');
+    }
 }

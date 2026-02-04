@@ -31,6 +31,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
     // FFT Logs
     Route::get('/logs/fft', [FftLogController::class, 'index'])->name('logs.fft');
     Route::get('/logs/fft/export', [FftLogController::class, 'export'])->name('logs.fft.export');
+    Route::delete('/logs/fft/reset', [FftLogController::class, 'destroyAll'])->name('logs.fft.destroy_all');
     
     // Settings
     Route::get('/settings', [SettingController::class, 'index'])->name('settings');

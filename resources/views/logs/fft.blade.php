@@ -52,14 +52,25 @@
         </form>
     </div>
 
-    <!-- Export Button -->
-    <div class="mb-4">
+    <!-- Export & Reset Buttons -->
+    <div class="mb-4 flex justify-between items-center">
         <a href="{{ route('logs.fft.export', request()->all()) }}" class="btn-primary inline-block">
             <svg class="w-5 h-5 inline mr-2" fill="currentColor" viewBox="0 0 20 20">
                 <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd"></path>
             </svg>
             Export CSV
         </a>
+
+        <form action="{{ route('logs.fft.destroy_all') }}" method="POST" onsubmit="return confirm('WARNING: This will permanently delete ALL FFT logs from the database. This action cannot be undone. Are you sure you want to proceed?');" class="inline">
+            @csrf
+            @method('DELETE')
+            <button type="submit" class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium transition-colors flex items-center">
+                <svg class="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+                Reset All Logs
+            </button>
+        </form>
     </div>
 
     <!-- Logs Table -->

@@ -21,13 +21,18 @@ class MqttListenerCommand extends Command
         $this->info('Starting MQTT Listener...');
 
         // Get MQTT configuration
-        $host = Setting::get('mqtt_host', env('MQTT_HOST'));
-        $port = (int) Setting::get('mqtt_port', env('MQTT_PORT', 8883));
-        $username = Setting::get('mqtt_username', env('MQTT_USERNAME'));
-        $password = env('MQTT_PASSWORD'); // From env for security
-        $topic = Setting::get('mqtt_topic_pattern', env('MQTT_TOPIC_PATTERN', 'audio/+/data'));
+        $host = Setting::get('mqtt_host', config('mqtt.host'));
+        $port = (int) Setting::get('mqtt_port', config('mqtt.port', 8883));
+        $username = Setting::get('mqtt_username', config('mqtt.username'));
+        $password = Setting::get('mqtt_password', config('mqtt.password')); // From DB or config/env
+        $topic = Setting::get('mqtt_topic_pattern', config('mqtt.topic_pattern', 'audio/+/data'));
         
-        $loggingInterval = (int) Setting::get('fft_logging_interval', env('FFT_LOGGING_INTERVAL', 10));
+        $loggingInterval = (int) Setting::get('fft_logging_interval', config('mqtt.fft_logging_interval', 10));
+
+        if (empty($host)) {
+            $this->error('ERROR: MQTT_HOST is not defined in .env or Settings!');
+            return self::FAILURE;
+        }
 
         $this->info("Connecting to MQTT broker: {$host}:{$port}");
         $this->info("Topic pattern: {$topic}");
@@ -207,23 +212,35 @@ class MqttListenerCommand extends Command
             'device_id' => $device->id,
             
             // Audio metrics
-            'rms' => $audio['rms'] ?? 0,
-            'db_spl' => $audio['db_spl'] ?? 0,
-            'peak_amplitude' => $audio['peak_amplitude'] ?? 0,
-            'noise_floor' => $audio['noise_floor'] ?? 0,
-            'gain' => $audio['gain'] ?? 1,
+            'rms' => $this->sanitizeValue($audio['rms'] ?? 0, 10, 6),
+            'db_spl' => (float) ($audio['db_spl'] ?? 0), // float is safer
+            'peak_amplitude' => $this->sanitizeValue($audio['peak_amplitude'] ?? 0, 10, 6),
+            'noise_floor' => $this->sanitizeValue($audio['noise_floor'] ?? 0, 10, 6),
+            'gain' => $this->sanitizeValue($audio['gain'] ?? 1, 10, 4),
             
             // FFT metrics
-            'peak_frequency' => $fft['peak_frequency'] ?? 0,
-            'peak_magnitude' => $fft['peak_magnitude'] ?? 0,
-            'total_energy' => $fft['total_energy'] ?? 0,
-            'band_low' => $fft['band_energy']['low'] ?? 0,
-            'band_mid' => $fft['band_energy']['mid'] ?? 0,
-            'band_high' => $fft['band_energy']['high'] ?? 0,
-            'spectral_centroid' => $fft['spectral_centroid'] ?? 0,
-            'zcr' => $fft['zcr'] ?? 0,
+            'peak_frequency' => $this->sanitizeValue($fft['peak_frequency'] ?? 0, 12, 4),
+            'peak_magnitude' => $this->sanitizeValue($fft['peak_magnitude'] ?? 0, 12, 4),
+            'total_energy' => $this->sanitizeValue($fft['total_energy'] ?? 0, 16, 4),
+            'band_low' => $this->sanitizeValue($fft['band_energy']['low'] ?? 0, 14, 4),
+            'band_mid' => $this->sanitizeValue($fft['band_energy']['mid'] ?? 0, 14, 4),
+            'band_high' => $this->sanitizeValue($fft['band_energy']['high'] ?? 0, 14, 4),
+            'spectral_centroid' => $this->sanitizeValue($fft['spectral_centroid'] ?? 0, 12, 4),
+            'zcr' => $this->sanitizeValue($fft['zcr'] ?? 0, 8, 6),
             
             'created_at' => now(),
         ]);
+    }
+
+    private function sanitizeValue(mixed $value, int $precision, int $scale): float
+    {
+        $floatValue = (float) ($value ?? 0);
+        $maxBeforeDecimal = $precision - $scale;
+        $max = pow(10, $maxBeforeDecimal) - 1 + (1 - pow(10, -$scale));
+        
+        if ($floatValue > $max) return $max;
+        if ($floatValue < -$max) return -$max;
+        
+        return $floatValue;
     }
 }

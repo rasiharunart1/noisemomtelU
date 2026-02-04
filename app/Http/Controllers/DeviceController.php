@@ -225,7 +225,7 @@ class DeviceController extends Controller
             $host = Setting::get('mqtt_host', env('MQTT_HOST'));
             $port = (int) Setting::get('mqtt_port', env('MQTT_PORT', 8883));
             $username = Setting::get('mqtt_username', env('MQTT_USERNAME'));
-            $password = env('MQTT_PASSWORD');
+            $password = Setting::get('mqtt_password', env('MQTT_PASSWORD'));
             
             // Command topic: audio/{device_id}/command
             $topic = "audio/{$device->device_id}/command";
