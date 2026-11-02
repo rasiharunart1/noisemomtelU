@@ -200,15 +200,11 @@
                 // Fix map size on load
                 setTimeout(function(){ map.invalidateSize()}, 400);
                 
-                // Tiles: Use CartoDB Positron for a cleaner look
-                const isDark = document.documentElement.classList.contains('dark');
-                const tileUrl = isDark 
-                    ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
-                    : 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
+                const tileUrl = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
 
                 L.tileLayer(tileUrl, {
                     maxZoom: 19,
-                    attribution: '&copy; CartoDB'
+                    attribution: '&copy; OpenStreetMap contributors'
                 }).addTo(map);
 
                 // Custom Icon

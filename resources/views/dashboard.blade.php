@@ -300,14 +300,11 @@
         const map = L.map('devices-map').setView([avgLat, avgLng], 12);
         
         // Add tile layer
-        const isDark = document.documentElement.classList.contains('dark');
-        const tileUrl = isDark 
-            ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
-            : 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
+        const tileUrl = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
         
         L.tileLayer(tileUrl, {
             maxZoom: 19,
-            attribution: '&copy; CartoDB'
+            attribution: '&copy; OpenStreetMap contributors'
         }).addTo(map);
         
         // Store markers for updates

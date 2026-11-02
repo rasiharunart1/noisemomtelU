@@ -167,12 +167,9 @@
                 map = L.map('devices-map').setView([-6.9744, 107.6303], 13);
                 map.zoomControl.setPosition('bottomright');
                 
-                const isDark = document.documentElement.classList.contains('dark');
-                const tileUrl = isDark 
-                    ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
-                    : 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
+                const tileUrl = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
 
-                L.tileLayer(tileUrl, { maxZoom: 19, attribution: '&copy; CartoDB' }).addTo(map);
+                L.tileLayer(tileUrl, { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
 
                 function createCustomIcon(status) {
                     const color = status === 'online' ? '#fbbf24' : '#ef4444';
