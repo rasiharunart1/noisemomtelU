@@ -357,6 +357,20 @@
                 </div>
             </div>
             
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+                <div class="sm:col-span-2">
+                    <label for="recording-duration" class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Duration (minutes, 0 = until stopped)</label>
+                    <input type="number" id="recording-duration" min="0" max="240" step="1" value="30"
+                           class="w-full px-4 py-2.5 rounded-xl border border-gray-200 dark:border-white/10 bg-white/50 dark:bg-white/5 text-gray-900 dark:text-white focus:ring-2 focus:ring-red-500 focus:border-transparent"
+                           placeholder="e.g. 30">
+                </div>
+                <div class="flex items-end">
+                    <div class="w-full px-4 py-2.5 rounded-xl bg-gray-100 dark:bg-white/5 text-xs text-gray-500 dark:text-gray-400">
+                        <span id="recording-estimate">~57.6 MB WAV</span>
+                    </div>
+                </div>
+            </div>
+
             <div class="flex space-x-3">
                 <button id="start-recording-btn" 
                         {{ $device->status !== 'online' ? 'disabled' : '' }}
@@ -379,6 +393,16 @@
                     </svg>
                     <span>Stop Recording</span>
                 </button>
+            </div>
+
+            <div id="recording-progress-wrap" class="hidden mt-4">
+                <div class="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400 mb-1">
+                    <span id="recording-progress-label">Recording to SD card...</span>
+                    <span id="recording-progress-time">00:00 / 00:00</span>
+                </div>
+                <div class="w-full h-2 bg-gray-200 dark:bg-white/10 rounded-full overflow-hidden">
+                    <div id="recording-progress-bar" class="h-full bg-gradient-to-r from-red-500 to-red-600 rounded-full transition-all duration-1000" style="width: 0%"></div>
+                </div>
             </div>
         </div>
     </div>
@@ -501,7 +525,7 @@
                             </div>
                             <div>
                                 <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">Duration (Seconds)</label>
-                                <input type="number" name="duration_seconds" min="5" max="300" value="30" required
+                                <input type="number" name="duration_seconds" min="5" max="14400" value="30" required
                                        class="w-full px-4 py-3 bg-gray-50 dark:bg-white/5 border border-gray-200 dark:border-white/10 rounded-xl focus:ring-2 focus:ring-emerald-500 dark:text-white">
                             </div>
                         </div>
@@ -727,16 +751,17 @@
                         <th class="px-6 py-4 font-semibold text-left w-12">
                             <input type="checkbox" id="select-all" class="w-4 h-4 rounded border-gray-300 text-red-600 focus:ring-red-500">
                         </th>
-                        <th class="px-6 py-4 font-semibold text-left">Time Uploaded</th>
+                        <th class="px-6 py-4 font-semibold text-left">Time Recorded</th>
                         <th class="px-6 py-4 font-semibold text-left">Filename</th>
                         <th class="px-6 py-4 font-semibold text-right">Size</th>
+                        <th class="px-6 py-4 font-semibold text-center">Status</th>
                         <th class="px-6 py-4 font-semibold text-center">Listen</th>
                         <th class="px-6 py-4 font-semibold text-right">Actions</th>
                     </tr>
                 </thead>
                 <tbody class="divide-y divide-gray-100 dark:divide-white/10">
                     @forelse($recordings as $rec)
-                        <tr class="hover:bg-red-50/50 dark:hover:bg-red-900/10 transition-colors">
+                        <tr class="hover:bg-red-50/50 dark:hover:bg-red-900/10 transition-colors" data-recording-row="{{ $rec->id }}">
                             <td class="px-6 py-4">
                                 <input type="checkbox" class="recording-checkbox w-4 h-4 rounded border-gray-300 text-red-600 focus:ring-red-500" value="{{ $rec->id }}">
                             </td>
@@ -749,21 +774,52 @@
                             <td class="px-6 py-4 text-right text-gray-700 dark:text-gray-300">
                                 {{ number_format($rec->file_size_bytes / 1024, 1) }} KB
                             </td>
+                            <td class="px-6 py-4 text-center">
+                                @if($rec->status === 'completed')
+                                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800 dark:bg-emerald-500/10 dark:text-emerald-400" data-recording-status="{{ $rec->id }}">Uploaded</span>
+                                @elseif($rec->status === 'on_device')
+                                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-500/10 dark:text-amber-400" data-recording-status="{{ $rec->id }}">On SD Card</span>
+                                @elseif($rec->status === 'requested')
+                                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-500/10 dark:text-blue-400" data-recording-status="{{ $rec->id }}">Requested</span>
+                                @elseif($rec->status === 'uploading')
+                                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-500/10 dark:text-blue-400 animate-pulse" data-recording-status="{{ $rec->id }}">Uploading...</span>
+                                @elseif($rec->status === 'upload_failed')
+                                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-500/10 dark:text-red-400" data-recording-status="{{ $rec->id }}">Upload Failed</span>
+                                @else
+                                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-white/10 dark:text-gray-400" data-recording-status="{{ $rec->id }}">{{ ucfirst($rec->status) }}</span>
+                                @endif
+                            </td>
                             <td class="px-6 py-4">
                                 <div class="flex justify-center">
-                                    <audio controls class="h-8 max-w-[200px] rounded-lg">
-                                        <source src="{{ asset('storage/' . $rec->path) }}" type="audio/wav">
-                                        Your browser does not support the audio element.
-                                    </audio>
+                                    @if($rec->status === 'completed' && $rec->path)
+                                        <audio controls class="h-8 max-w-[200px] rounded-lg">
+                                            <source src="{{ asset('storage/' . $rec->path) }}" type="audio/wav">
+                                            Your browser does not support the audio element.
+                                        </audio>
+                                    @else
+                                        <span class="text-xs text-gray-400 italic" data-recording-listen="{{ $rec->id }}">—</span>
+                                    @endif
                                 </div>
                             </td>
-                            <td class="px-6 py-4 text-right">
-                                <a href="{{ route('recordings.download', $rec) }}" class="text-red-600 hover:text-red-500 font-medium text-xs">Download</a>
+                            <td class="px-6 py-4 text-right whitespace-nowrap">
+                                @if($rec->status === 'completed' && $rec->path)
+                                    <a href="{{ route('recordings.download', $rec) }}" class="text-red-600 hover:text-red-500 font-medium text-xs">Download</a>
+                                @elseif(in_array($rec->status, ['on_device', 'upload_failed', 'requested']))
+                                    <button type="button"
+                                            data-fetch-recording="{{ $rec->id }}"
+                                            data-fetch-url="{{ route('devices.recordings.request', [$device, $rec]) }}"
+                                            data-status-url="{{ route('devices.recordings.status', [$device, $rec]) }}"
+                                            class="text-blue-600 hover:text-blue-500 font-medium text-xs disabled:opacity-50 disabled:cursor-not-allowed">
+                                        Fetch from Device
+                                    </button>
+                                @else
+                                    <span class="text-xs text-gray-400 italic">—</span>
+                                @endif
                             </td>
                         </tr>
                     @empty
                         <tr>
-                            <td colspan="6" class="px-6 py-8 text-center text-gray-500 italic">No recordings uploaded yet</td>
+                            <td colspan="7" class="px-6 py-8 text-center text-gray-500 italic">No recordings yet</td>
                         </tr>
                     @endforelse
                 </tbody>
@@ -1104,6 +1160,31 @@
         const stopRecordingBtn = document.getElementById('stop-recording-btn');
         const recordingStatusText = document.getElementById('recording-status-text');
         const recordingStatusDot = document.getElementById('recording-status-dot');
+        const recordingDurationInput = document.getElementById('recording-duration');
+        const recordingEstimate = document.getElementById('recording-estimate');
+        const progressWrap = document.getElementById('recording-progress-wrap');
+        const progressBar = document.getElementById('recording-progress-bar');
+        const progressLabel = document.getElementById('recording-progress-label');
+        const progressTime = document.getElementById('recording-progress-time');
+
+        // WAV size estimate: 16000 samples/s * 2 bytes = 32000 B/s
+        function updateSizeEstimate() {
+            const minutes = parseFloat(recordingDurationInput.value) || 0;
+            if (minutes <= 0) {
+                recordingEstimate.textContent = 'Manual stop';
+                return;
+            }
+            const mb = (minutes * 60 * 32000) / (1024 * 1024);
+            recordingEstimate.textContent = '~' + mb.toFixed(1) + ' MB WAV';
+        }
+        recordingDurationInput.addEventListener('input', updateSizeEstimate);
+        updateSizeEstimate();
+
+        function formatTime(totalSeconds) {
+            const m = Math.floor(totalSeconds / 60);
+            const s = Math.floor(totalSeconds % 60);
+            return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+        }
 
         // Subscribe to recording status topic
         const recordingStatusTopic = 'audio/{{ $device->device_id }}/recording_status';
@@ -1115,12 +1196,44 @@
             if (topic === recordingStatusTopic) {
                 try {
                     const data = JSON.parse(message.toString());
-                    updateRecordingStatus(data.status);
+                    handleRecordingStatusMessage(data);
                 } catch (e) {
                     console.error('Error parsing recording status:', e);
                 }
             }
         });
+
+        function handleRecordingStatusMessage(data) {
+            if (data.status === 'recording') {
+                updateRecordingStatus('recording');
+                // Progress update from the device
+                if (data.elapsed !== undefined) {
+                    const elapsed = data.elapsed;
+                    const total = data.duration || 0;
+                    progressWrap.classList.remove('hidden');
+                    progressLabel.textContent = 'Recording to SD card: ' + (data.filename || '');
+                    if (total > 0) {
+                        progressTime.textContent = formatTime(elapsed) + ' / ' + formatTime(total);
+                        progressBar.style.width = Math.min(100, (elapsed / total) * 100) + '%';
+                    } else {
+                        progressTime.textContent = formatTime(elapsed) + ' / manual';
+                        progressBar.style.width = '100%';
+                    }
+                }
+            } else if (data.status === 'completed') {
+                updateRecordingStatus('idle');
+                progressWrap.classList.add('hidden');
+                // A new file is on the SD card; reload the table
+                window.location.reload();
+            } else if (data.status === 'uploading') {
+                updateRecordingStatus('uploading');
+            } else if (data.status === 'upload_completed' || data.status === 'upload_failed') {
+                updateRecordingStatus('idle');
+            } else if (data.status === 'idle') {
+                updateRecordingStatus('idle');
+                progressWrap.classList.add('hidden');
+            }
+        }
 
         function updateRecordingStatus(status) {
             if (status === 'recording' || status === 'uploading') {
@@ -1136,6 +1249,7 @@
             } else {
                 recordingStatusText.innerText = 'Idle';
                 recordingStatusDot.className = 'w-3 h-3 rounded-full bg-gray-400';
+                progressWrap.classList.add('hidden');
                 
                 // Only enable start button if device is online
                 const deviceOnline = document.getElementById('status-text').innerText.toLowerCase().includes('online');
@@ -1185,18 +1299,31 @@
         });
 
         startRecordingBtn.addEventListener('click', async () => {
+            const minutes = parseFloat(recordingDurationInput.value) || 0;
+            const durationSeconds = Math.round(minutes * 60);
+
             try {
                 const response = await fetch("{{ route('devices.record.start', $device) }}", {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                         'X-CSRF-TOKEN': '{{ csrf_token() }}'
-                    }
+                    },
+                    body: JSON.stringify({ duration: durationSeconds })
                 });
                 const result = await response.json();
                 if (result.success) {
-                    console.log('Recording started');
+                    console.log('Recording started (' + durationSeconds + 's)');
                     updateRecordingStatus('recording');
+                    progressWrap.classList.remove('hidden');
+                    progressLabel.textContent = 'Recording to SD card...';
+                    if (durationSeconds > 0) {
+                        progressTime.textContent = '00:00 / ' + formatTime(durationSeconds);
+                        progressBar.style.width = '0%';
+                    } else {
+                        progressTime.textContent = '00:00 / manual';
+                        progressBar.style.width = '100%';
+                    }
                 }
             } catch (err) {
                 console.error('Failed to start recording:', err);
@@ -1289,6 +1416,92 @@
             form.submit();
             document.body.removeChild(form);
         });
+
+        // --- Fetch From Device (on-demand upload) Logic ---
+        document.querySelectorAll('[data-fetch-recording]').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const recordingId = btn.dataset.fetchRecording;
+                const requestUrl = btn.dataset.fetchUrl;
+                const statusUrl = btn.dataset.statusUrl;
+
+                btn.disabled = true;
+                btn.textContent = 'Requesting...';
+
+                try {
+                    const response = await fetch(requestUrl, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-CSRF-TOKEN': '{{ csrf_token() }}'
+                        }
+                    });
+                    const result = await response.json();
+
+                    if (!result.success) {
+                        btn.textContent = 'Fetch from Device';
+                        btn.disabled = false;
+                        alert(result.message || 'Failed to request recording');
+                        return;
+                    }
+
+                    if (result.status === 'completed') {
+                        window.location.reload();
+                        return;
+                    }
+
+                    // Poll the recording status until the upload finishes
+                    btn.textContent = 'Uploading...';
+                    pollRecordingStatus(statusUrl, recordingId, btn);
+                } catch (err) {
+                    console.error('Failed to fetch recording:', err);
+                    btn.textContent = 'Fetch from Device';
+                    btn.disabled = false;
+                }
+            });
+        });
+
+        function pollRecordingStatus(statusUrl, recordingId, btn) {
+            const pollInterval = setInterval(async () => {
+                try {
+                    const response = await fetch(statusUrl);
+                    const result = await response.json();
+
+                    if (!result.success) {
+                        clearInterval(pollInterval);
+                        btn.textContent = 'Fetch from Device';
+                        btn.disabled = false;
+                        return;
+                    }
+
+                    const statusBadge = document.querySelector(`[data-recording-status="${recordingId}"]`);
+
+                    if (result.status === 'completed') {
+                        clearInterval(pollInterval);
+                        // Reload to show the audio player and download link
+                        window.location.reload();
+                    } else if (result.status === 'upload_failed') {
+                        clearInterval(pollInterval);
+                        if (statusBadge) {
+                            statusBadge.textContent = 'Upload Failed';
+                            statusBadge.className = 'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-500/10 dark:text-red-400';
+                        }
+                        btn.textContent = 'Retry Fetch';
+                        btn.disabled = false;
+                    } else if (result.status === 'uploading') {
+                        if (statusBadge) {
+                            statusBadge.textContent = 'Uploading...';
+                            statusBadge.className = 'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-500/10 dark:text-blue-400 animate-pulse';
+                        }
+                        btn.textContent = 'Uploading...';
+                    }
+                } catch (err) {
+                    console.error('Status poll failed:', err);
+                }
+            }, 3000);
+
+            // Stop polling after 15 minutes (large files over slow links)
+            setTimeout(() => clearInterval(pollInterval), 15 * 60 * 1000);
+        }
 
         // --- WiFi Management Logic ---
         async function resetWifiToAP() {

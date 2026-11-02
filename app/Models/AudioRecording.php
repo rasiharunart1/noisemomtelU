@@ -13,10 +13,12 @@ class AudioRecording extends Model
         'device_id',
         'filename',
         'path',
+        'sd_filename',
         'duration_seconds',
         'file_size_bytes',
         'status',
         'recording_session_id',
+        'uploaded_at',
     ];
 
     public function device()

@@ -21,6 +21,16 @@ php artisan migrate --force
 php artisan optimize
 ```
 
+`npm run build` wajib berhasil sebelum membuka website. Laravel membutuhkan file
+`public/build/manifest.json` ketika `APP_ENV=production` dan view menggunakan
+`@vite`. Jika muncul `ViteManifestNotFoundException`, jalankan:
+
+```bash
+npm install
+npm run build
+php artisan optimize:clear
+```
+
 ### 4. Fix Permissions
 ```bash
 chmod -R 775 storage bootstrap/cache
@@ -125,12 +135,15 @@ supervisorctl restart laravel-scheduler
 
 ### Migration Error
 ```bash
-# Fake migration yang duplicate
-php artisan migrate --fake --path=database/migrations/FILENAME.php
-
-# Skip dan lanjut ke next
+# Lihat status migrasi dan error lengkap
+php artisan migrate:status
 php artisan migrate --force
 ```
+
+Jangan memakai `migrate --fake` untuk melewati migrasi sebelum memastikan
+struktur tabel sudah sesuai. Untuk backup database yang sudah memiliki kolom
+`db_spl`, migrasi `2026_01_20_053359_add_db_spl_to_fft_logs_table.php` akan
+mengubah tipe kolom tanpa menambah kolom kedua.
 
 ---
 

@@ -17,7 +17,7 @@ class ScheduleController extends Controller
             'start_time' => 'required|date|after:now',
             'end_time' => 'required|date|after:start_time',
             'interval_minutes' => 'required|integer|min:1',
-            'duration_seconds' => 'required|integer|min:5|max:300',
+            'duration_seconds' => 'required|integer|min:5|max:14400',
         ]);
 
         $device->schedules()->create([

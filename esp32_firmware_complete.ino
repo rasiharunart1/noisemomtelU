@@ -93,8 +93,11 @@ const unsigned long FFT_INTERVAL = 1000; // 1 second interval
 bool isRecording = false;
 File audioFile;
 uint32_t recordedSamples = 0;
-uint32_t totalSamplesToRecord = 0;
+uint32_t totalSamplesToRecord = 0; // 0 = manual stop only
+uint32_t recordingStartMillis = 0;
+uint32_t plannedDurationSeconds = 0;
 String currentFilename = "";
+bool isUploading = false;
 
 // WAV Header Structure
 struct WAVHeader {
@@ -116,6 +119,7 @@ struct WAVHeader {
 // Function Prototypes
 void stopRecording();
 void uploadFile(const char *filename);
+void publishRecordingProgress();
 
 void saveConfigCallback() {
   Serial.println("Should save config");
@@ -202,8 +206,8 @@ void setupI2S() {
       .communication_format =
           (i2s_comm_format_t)(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB),
       .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-      .dma_buf_count = 8,
-      .dma_buf_len = 128,
+      .dma_buf_count = 16,
+      .dma_buf_len = 512,
       .use_apll = false};
 
   const i2s_pin_config_t pin_config = {.bck_io_num = I2S_SCK,
@@ -230,13 +234,41 @@ void publishRecordingStatus(const char *status) {
   doc["device_id"] = DEVICE_ID;
   doc["timestamp"] = millis();
 
-  char buffer[128];
+  if (strlen(status) > 0) {
+    if (strcmp(status, "completed") == 0 || strcmp(status, "idle") == 0) {
+      // Include file info so Laravel can register the on-device file
+      doc["filename"] = currentFilename;
+      doc["duration"] = plannedDurationSeconds;
+      doc["samples"] = recordedSamples;
+      doc["size"] = recordedSamples * 2 + 44;
+    }
+  }
+
+  char buffer[256];
   serializeJson(doc, buffer);
   mqttClient.publish(recording_status_topic, buffer);
   Serial.printf("Published recording status: %s\n", status);
 }
 
-void startRecording(const char *filename) {
+void publishRecordingProgress() {
+  if (!isRecording)
+    return;
+
+  JsonDocument doc;
+  doc["status"] = "recording";
+  doc["device_id"] = DEVICE_ID;
+  doc["filename"] = currentFilename;
+  doc["elapsed"] = (millis() - recordingStartMillis) / 1000;
+  doc["duration"] = plannedDurationSeconds;
+  doc["samples"] = recordedSamples;
+  doc["size"] = recordedSamples * 2 + 44;
+
+  char buffer[256];
+  serializeJson(doc, buffer);
+  mqttClient.publish(recording_status_topic, buffer);
+}
+
+void startRecording(const char *filename, uint32_t durationSeconds) {
   if (isRecording)
     return;
 
@@ -257,9 +289,15 @@ void startRecording(const char *filename) {
   recordedSamples = 0;
   isRecording = true;
   currentFilename = String(filename);
+  plannedDurationSeconds = durationSeconds;
+  recordingStartMillis = millis();
+  totalSamplesToRecord =
+      (durationSeconds > 0) ? (uint32_t)SAMPLING_FREQ * durationSeconds : 0;
 
   publishRecordingStatus("recording");
-  Serial.printf("Started recording: %s (Manual Stop)\n", filename);
+  Serial.printf("Started recording: %s (%u seconds, auto-stop %s)\n",
+                filename, durationSeconds,
+                totalSamplesToRecord > 0 ? "ON" : "OFF");
 }
 
 void stopRecording() {
@@ -278,12 +316,10 @@ void stopRecording() {
   audioFile.write((uint8_t *)&header, sizeof(header));
   audioFile.close();
 
-  publishRecordingStatus("idle");
-  Serial.printf("Recording finished! %d samples.\n", recordedSamples);
-
-  // Trigger Upload (This will block for a moment, but that's acceptable AFTER
-  // recording)
-  uploadFile(currentFilename.c_str());
+  // File stays on SD card. Laravel requests upload on-demand (upload_file).
+  publishRecordingStatus("completed");
+  Serial.printf("Recording finished! %u samples. File kept on SD: %s\n",
+                recordedSamples, currentFilename.c_str());
 }
 
 void processFFTAndPublish(double rms) {
@@ -376,28 +412,35 @@ void processFFTAndPublish(double rms) {
 void uploadFile(const char *filename) {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi disconnected, cannot upload.");
+    publishRecordingStatus("upload_failed");
     return;
   }
 
   if (!SD.exists(filename)) {
     Serial.printf("File does not exist: %s\n", filename);
+    publishRecordingStatus("upload_failed");
     return;
   }
 
   File file = SD.open(filename, FILE_READ);
   if (!file) {
     Serial.println("Failed to open file for reading");
+    publishRecordingStatus("upload_failed");
     return;
   }
 
   uint32_t fileSize = file.size();
-  Serial.printf("Uploading %s (%d bytes)...\n", filename, fileSize);
+  Serial.printf("Uploading %s (%u bytes)...\n", filename, fileSize);
 
   if (fileSize == 0) {
     Serial.println("File is empty, skipping upload.");
     file.close();
+    publishRecordingStatus("upload_failed");
     return;
   }
+
+  isUploading = true;
+  publishRecordingStatus("uploading");
 
   // Raw WiFiClient for manual multipart POST
   WiFiClient client;
@@ -408,6 +451,8 @@ void uploadFile(const char *filename) {
   if (!client.connect(host, port)) {
     Serial.printf("Connection failed to %s:%d!\n", host, port);
     file.close();
+    isUploading = false;
+    publishRecordingStatus("upload_failed");
     return;
   }
 
@@ -421,7 +466,8 @@ void uploadFile(const char *filename) {
   head += "Content-Disposition: form-data; name=\"token\"\r\n\r\n" +
           String(DEVICE_TOKEN) + "\r\n";
   head += "--" + boundary + "\r\n";
-  head += "Content-Disposition: form-data; name=\"duration\"\r\n\r\n10\r\n";
+  head += "Content-Disposition: form-data; name=\"duration\"\r\n\r\n" +
+          String(plannedDurationSeconds) + "\r\n";
   head += "--" + boundary + "\r\n";
   head += "Content-Disposition: form-data; name=\"audio\"; filename=\"" +
           String(filename) + "\"\r\n";
@@ -444,7 +490,7 @@ void uploadFile(const char *filename) {
   client.print(head);
 
   // Stream File
-  uint8_t buffer[1024];
+  uint8_t buffer[4096];
   size_t bytesRead;
   while ((bytesRead = file.read(buffer, sizeof(buffer))) > 0) {
     client.write(buffer, bytesRead);
@@ -455,10 +501,12 @@ void uploadFile(const char *filename) {
   // Read Response
   unsigned long timeout = millis();
   while (client.available() == 0) {
-    if (millis() - timeout > 5000) {
+    if (millis() - timeout > 30000) {
       Serial.println("Timeout waiting for response");
       client.stop();
       file.close();
+      isUploading = false;
+      publishRecordingStatus("upload_failed");
       return;
     }
   }
@@ -475,7 +523,15 @@ void uploadFile(const char *filename) {
 
   client.stop();
   file.close();
-  SD.remove(filename);
+  isUploading = false;
+
+  // Keep the file on SD until Laravel confirms it was stored.
+  // Laravel sends "delete_file" after successful upload.
+  if (responseLine.indexOf("201") > 0 || responseLine.indexOf("200") > 0) {
+    publishRecordingStatus("upload_completed");
+  } else {
+    publishRecordingStatus("upload_failed");
+  }
   Serial.println("Upload finished.");
 }
 
@@ -486,11 +542,29 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
 
   if (strcmp(topic, command_topic) == 0) {
     if (strcmp(action, "start_recording") == 0) {
+      // Duration in seconds (0 = record until manual stop)
+      uint32_t duration = doc["duration"] | 0;
       String fname =
           "/rec_" + String(DEVICE_ID) + "_" + String(millis()) + ".wav";
-      startRecording(fname.c_str());
+      startRecording(fname.c_str(), duration);
     } else if (strcmp(action, "stop_recording") == 0) {
       stopRecording();
+    } else if (strcmp(action, "upload_file") == 0) {
+      // On-demand upload: Laravel requests a specific file from the SD card
+      const char *fname = doc["filename"];
+      if (fname && strlen(fname) > 0) {
+        Serial.printf("Command: Upload file %s\n", fname);
+        uploadFile(fname);
+      } else {
+        Serial.println("Command: upload_file missing filename");
+      }
+    } else if (strcmp(action, "delete_file") == 0) {
+      // Laravel confirms the file was stored; free SD card space
+      const char *fname = doc["filename"];
+      if (fname && strlen(fname) > 0 && SD.exists(fname)) {
+        SD.remove(fname);
+        Serial.printf("Command: Deleted file %s\n", fname);
+      }
     } else if (strcmp(action, "reset_wifi") == 0) {
       Serial.println("Command: Resetting WiFi (Web Trigger)");
       wm.resetSettings();
@@ -597,8 +671,21 @@ void loop() {
     if (audioFile) {
       audioFile.write((uint8_t *)i2sBuffer, bytes_read);
       recordedSamples += samples_read;
-      // Manual stop only
+
+      // Auto-stop when the planned duration is reached
+      if (totalSamplesToRecord > 0 &&
+          recordedSamples >= totalSamplesToRecord) {
+        Serial.println("Planned duration reached, stopping recording.");
+        stopRecording();
+      }
     }
+  }
+
+  // 3b. Publish recording progress every 5 seconds (realtime monitoring)
+  static unsigned long lastProgressTime = 0;
+  if (isRecording && millis() - lastProgressTime >= 5000) {
+    lastProgressTime = millis();
+    publishRecordingProgress();
   }
 
   // 4. Calculate RMS & Send FFT (THROTTLED)

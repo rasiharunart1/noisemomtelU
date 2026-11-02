@@ -237,7 +237,11 @@
                     </p>
                     
                      <!-- Mini Recording Controls -->
-                     <div class="flex space-x-2">
+                     <div class="flex items-center space-x-2">
+                        <input type="number" class="rec-duration-input w-16 px-2 py-1.5 text-xs rounded-lg border border-gray-200 dark:border-white/10 bg-white/50 dark:bg-white/5 text-gray-900 dark:text-white focus:ring-2 focus:ring-emerald-500"
+                               min="0" max="240" step="1" value="30"
+                               title="Duration in minutes (0 = until stopped)"
+                               aria-label="Recording duration in minutes">
                         <button class="btn-start-rec p-2 bg-emerald-500/10 text-emerald-600 rounded-lg hover:bg-emerald-500 hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                 title="Start Recording"
                                 data-device-id="{{ $device->device_id }}"
@@ -736,17 +740,22 @@
             btn.addEventListener('click', async (e) => {
                 const deviceId = btn.dataset.deviceUuid; // Ensure this is UUID for route
                 const mqttId = btn.dataset.deviceId;
-                
+                const card = btn.closest('[data-device-id]');
+                const durationInput = card ? card.querySelector('.rec-duration-input') : null;
+                const minutes = durationInput ? (parseFloat(durationInput.value) || 0) : 0;
+                const durationSeconds = Math.round(minutes * 60);
+
                 // Optimistic UI update
                 updateRecordingState(mqttId, true, true);
 
                 try {
-                    await fetch(`/devices/${deviceId}/record/start`, { // Assuming route exists
+                    await fetch(`/devices/${deviceId}/record/start`, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
                             'X-CSRF-TOKEN': '{{ csrf_token() }}'
-                        }
+                        },
+                        body: JSON.stringify({ duration: durationSeconds })
                     });
                 } catch (err) {
                     console.error('Failed to start recording', err);

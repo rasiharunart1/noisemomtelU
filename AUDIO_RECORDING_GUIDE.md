@@ -2,6 +2,26 @@
 
 Great job berhasil mengakses SD Card! Untuk merekam audio, kita perlu menambahkan perangkat keras mikrofon dan sedikit logika perangkat lunak untuk menyimpan data suara dalam format yang bisa diputar (WAV).
 
+## 0. Arsitektur Recording On-Demand (BARU)
+
+Rekaman sekarang berjalan **sepenuhnya di perangkat** — tidak ada transaksi file selama perekaman:
+
+```mermaid
+flowchart LR
+    A[Web: set durasi\nmis. 30 menit] -->|MQTT start_recording\nduration=1800| B[ESP32 rekam ke SD\nauto-stop + progress tiap 5s]
+    B -->|MQTT recording_status\ncompleted + filename| C[Laravel buat record\nstatus on_device]
+    C -->|User klik\nFetch from Device| D[Laravel set requested\n+ MQTT upload_file]
+    D -->|ESP32 upload multipart| E[AudioUploadController\nupsert + completed]
+    E -->|MQTT delete_file| F[SD card dibersihkan]
+    E --> G[Web: audio player\n+ tombol Download]
+```
+
+Poin penting:
+- **Durasi diatur dari web** (menit, 0 = rekam sampai dihentikan manual). Dikirim per-sesi via MQTT `start_recording` payload `duration` (detik). Maksimum 14400 detik (4 jam); 30 menit ≈ 57,6 MB WAV (16000 Hz × 2 byte).
+- **Tanpa putus-putus**: ESP32 menulis langsung ke SD card dengan DMA buffer besar; Laravel hanya menerima progress tiap 5 detik via topik `audio/{device_id}/recording_status`.
+- **Upload on-demand**: file hanya dikirim ke Laravel saat user klik "Fetch from Device" di halaman device. Setelah tersimpan, Laravel otomatis mengirim `delete_file` agar SD card tidak penuh.
+- **Status rekaman di DB**: `on_device` (file di SD), `requested` (upload diminta), `uploading`, `completed` (tersimpan di server), `upload_failed`.
+
 ## 1. Perangkat Keras (Hardware)
 
 Anda membutuhkan mikrofon dengan antarmuka **I2S**. Mikrofon analog biasa sulit digunakan untuk kualitas audio yang baik dengan ESP32 tanpa komponen tambahan.
@@ -59,6 +79,18 @@ Lihat `struct WAVHeader` di dalam file `esp32_firmware_complete.ino`.
 2. Buka `esp32_firmware_complete.ino` di Arduino IDE.
 3. Pastikan library `ArduinoJson` dan `PubSubClient` terinstall.
 4. Upload ke ESP32.
-5. Gunakan MQTT untuk mengirim perintah `start_recording` (atau ubah kode untuk merekam otomatis saat boot jika ingin tes manual).
+5. Buka halaman device di web, isi durasi (menit) lalu klik **Start Recording** — atau gunakan tombol mini di dashboard.
+6. Pantau progress bar realtime di halaman device. Saat selesai, rekaman muncul di tabel dengan status **On SD Card**.
+7. Klik **Fetch from Device** untuk meminta upload. Halaman otomatis reload saat upload selesai dan audio player + tombol Download muncul.
+
+Perintah MQTT yang didukung firmware:
+| Action | Payload | Keterangan |
+| :--- | :--- | :--- |
+| `start_recording` | `{"duration": 1800}` | Mulai rekam; `duration` dalam detik, 0 = sampai dihentikan |
+| `stop_recording` | — | Hentikan rekaman manual |
+| `upload_file` | `{"filename": "/rec_XXX.wav"}` | Upload file dari SD ke server |
+| `delete_file` | `{"filename": "/rec_XXX.wav"}` | Hapus file dari SD card |
+
+Catatan server: pastikan `php.ini` memiliki `upload_max_filesize` dan `post_max_size` yang cukup (sudah diset 512M/520M di XAMPP). Jika memakai Apache, restart setelah mengubah `php.ini`.
 
 Jika Anda ingin versi yang lebih sederhana hanya untuk tes rekam tanpa MQTT/WiFi, Anda bisa melihat `esp32_firmware_recording.ino`, namun Anda perlu menambahkan logika **WAV Header** agar file hasil rekaman bisa diputar di laptop.

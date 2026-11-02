@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use App\Models\Device;
 use App\Models\FftLog;
 use App\Models\Setting;
+use App\Models\AudioRecording;
 use Illuminate\Console\Command;
 use PhpMqtt\Client\MqttClient;
 use PhpMqtt\Client\ConnectionSettings;
@@ -71,7 +72,13 @@ class MqttListenerCommand extends Command
                 $this->processMessage($receivedTopic, $message, $loggingInterval);
             }, 0);
 
-            $this->info('✓ Subscribed to topics: ' . $topic . ' & ' . $statusTopic);
+            // Subscribe to recording status topic (e.g., audio/+/recording_status)
+            $recordingTopic = str_replace('/data', '/recording_status', $topic);
+            $mqtt->subscribe($recordingTopic, function (string $receivedTopic, string $message) {
+                $this->processRecordingStatus($receivedTopic, $message);
+            }, 0);
+
+            $this->info('✓ Subscribed to topics: ' . $topic . ' & ' . $statusTopic . ' & ' . $recordingTopic);
 
             // Register loop handler for periodic tasks
             $lastCheck = time();
@@ -201,6 +208,66 @@ class MqttListenerCommand extends Command
 
         } catch (\Exception $e) {
             $this->error('Error processing message: ' . $e->getMessage());
+        }
+    }
+
+    private function processRecordingStatus(string $topic, string $message): void
+    {
+        try {
+            $data = json_decode($message, true);
+
+            if (!$data || !isset($data['device_id'])) {
+                return;
+            }
+
+            $device = Device::where('device_id', $data['device_id'])->first();
+            if (!$device) {
+                return;
+            }
+
+            $status = $data['status'] ?? null;
+            $sdFilename = $data['filename'] ?? null;
+
+            // Keep the device marked online while it records/uploads
+            $device->update(['last_seen' => now()]);
+
+            if ($status === 'completed' && $sdFilename) {
+                // Recording finished on the device; file stays on the SD card
+                // until the user requests it from the web.
+                AudioRecording::updateOrCreate(
+                    [
+                        'device_id' => $device->id,
+                        'sd_filename' => $sdFilename,
+                    ],
+                    [
+                        'filename' => ltrim($sdFilename, '/'),
+                        'path' => '',
+                        'duration_seconds' => isset($data['duration']) ? (int) $data['duration'] : null,
+                        'file_size_bytes' => (int) ($data['size'] ?? 0),
+                        'status' => 'on_device',
+                        'uploaded_at' => null,
+                    ]
+                );
+                $this->info("🎙 Device {$device->device_id} finished recording {$sdFilename} (kept on SD card)");
+            } elseif ($status === 'uploading' && $sdFilename) {
+                AudioRecording::where('device_id', $device->id)
+                    ->where('sd_filename', $sdFilename)
+                    ->update(['status' => 'uploading']);
+            } elseif ($status === 'upload_completed' && $sdFilename) {
+                // The upload endpoint sets 'completed'; this is a safety net
+                // in case the HTTP response was missed.
+                AudioRecording::where('device_id', $device->id)
+                    ->where('sd_filename', $sdFilename)
+                    ->where('status', '!=', 'completed')
+                    ->update(['status' => 'completed', 'uploaded_at' => now()->timestamp]);
+            } elseif ($status === 'upload_failed' && $sdFilename) {
+                AudioRecording::where('device_id', $device->id)
+                    ->where('sd_filename', $sdFilename)
+                    ->update(['status' => 'upload_failed']);
+            }
+
+        } catch (\Exception $e) {
+            $this->error('Error processing recording status: ' . $e->getMessage());
         }
     }
 

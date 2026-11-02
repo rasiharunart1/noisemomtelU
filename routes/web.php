@@ -22,6 +22,8 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::post('/devices/{device}/threshold', [DeviceController::class, 'updateThreshold'])->name('devices.threshold');
     Route::post('/devices/{device}/record/start', [DeviceController::class, 'startRecording'])->name('devices.record.start');
     Route::post('/devices/{device}/record/stop', [DeviceController::class, 'stopRecording'])->name('devices.record.stop');
+    Route::post('/devices/{device}/recordings/{recording}/request', [DeviceController::class, 'requestRecording'])->name('devices.recordings.request');
+    Route::get('/devices/{device}/recordings/{recording}/status', [DeviceController::class, 'recordingStatus'])->name('devices.recordings.status');
     Route::post('/devices/{device}/wifi/reset', [DeviceController::class, 'resetWifi'])->name('devices.wifi.reset');
     Route::post('/devices/{device}/wifi/update', [DeviceController::class, 'updateWifi'])->name('devices.wifi.update');
     

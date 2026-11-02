@@ -11,8 +11,16 @@ return new class extends Migration
      */
     public function up(): void
     {
+        if (Schema::hasColumn('fft_logs', 'db_spl')) {
+            Schema::table('fft_logs', function (Blueprint $table) {
+                $table->decimal('db_spl', 8, 2)->nullable()->change();
+            });
+
+            return;
+        }
+
         Schema::table('fft_logs', function (Blueprint $table) {
-            $table->decimal('db_spl', 8, 2)->after('rms')->nullable();
+            $table->decimal('db_spl', 8, 2)->nullable();
         });
     }
 
@@ -21,8 +29,12 @@ return new class extends Migration
      */
     public function down(): void
     {
+        if (!Schema::hasColumn('fft_logs', 'db_spl')) {
+            return;
+        }
+
         Schema::table('fft_logs', function (Blueprint $table) {
-            $table->dropColumn('db_spl');
+            $table->float('db_spl')->nullable()->change();
         });
     }
 };

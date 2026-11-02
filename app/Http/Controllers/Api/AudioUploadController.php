@@ -5,9 +5,12 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Device;
 use App\Models\AudioRecording;
+use App\Models\Setting;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
+use PhpMqtt\Client\MqttClient;
+use PhpMqtt\Client\ConnectionSettings;
 
 class AudioUploadController extends Controller
 {
@@ -29,7 +32,7 @@ class AudioUploadController extends Controller
         $validator = Validator::make($request->all(), [
             'device_id' => 'required|exists:devices,device_id',
             'token'     => 'required|string',
-            'audio'     => 'required|file|mimes:wav,mp3,bin,aac|max:10240', // 10MB Max
+            'audio'     => 'required|file|mimes:wav,mp3,bin,aac|max:512000', // 500MB max (long SD recordings)
             'duration'  => 'nullable|integer',
         ]);
 
@@ -73,21 +76,47 @@ class AudioUploadController extends Controller
                 ], 400);
             }
 
+            // The ESP32 reports the SD card path (e.g. /rec_ESP32-XXX_123.wav)
+            // as the original filename. Use it to match an existing on-device
+            // record so a re-upload updates instead of duplicating.
+            $sdFilename = $file->getClientOriginalName();
+            $existing = AudioRecording::where('device_id', $device->id)
+                ->where('sd_filename', $sdFilename)
+                ->first();
+
             $filename = 'rec_' . $device->device_id . '_' . time() . '.' . $file->getClientOriginalExtension();
             
             try {
                 // Store in public disk
                 $path = $file->storeAs('recordings', $filename, 'public');
 
-                // Save to database
-                $recording = AudioRecording::create([
-                    'device_id'        => $device->id,
-                    'filename'         => $filename,
-                    'path'             => $path,
-                    'duration_seconds' => $request->input('duration'),
-                    'file_size_bytes'  => $file->getSize(),
-                    'status'           => 'completed',
-                ]);
+                if ($existing) {
+                    // Replace the stored file of the previous attempt, if any
+                    if ($existing->path && $existing->path !== $path) {
+                        Storage::disk('public')->delete($existing->path);
+                    }
+                    $existing->update([
+                        'filename'         => $filename,
+                        'path'             => $path,
+                        'duration_seconds' => $request->input('duration', $existing->duration_seconds),
+                        'file_size_bytes'  => $file->getSize(),
+                        'status'           => 'completed',
+                        'uploaded_at'      => now()->timestamp,
+                    ]);
+                    $recording = $existing;
+                } else {
+                    // Save to database
+                    $recording = AudioRecording::create([
+                        'device_id'        => $device->id,
+                        'filename'         => $filename,
+                        'path'             => $path,
+                        'sd_filename'      => $sdFilename,
+                        'duration_seconds' => $request->input('duration'),
+                        'file_size_bytes'  => $file->getSize(),
+                        'status'           => 'completed',
+                        'uploaded_at'      => now()->timestamp,
+                    ]);
+                }
 
                 \Log::info('Audio uploaded successfully', [
                     'device_id' => $device->device_id,
@@ -95,6 +124,10 @@ class AudioUploadController extends Controller
                     'size' => $file->getSize(),
                     'recording_id' => $recording->id
                 ]);
+
+                // Tell the device to free up SD card space now that the
+                // recording is safely stored on the server.
+                $this->sendDeleteFileCommand($device, $sdFilename);
 
                 return response()->json([
                     'success' => true,
@@ -123,5 +156,53 @@ class AudioUploadController extends Controller
             'success' => false,
             'error' => 'No audio file found'
         ], 400);
+    }
+
+    /**
+     * Ask the device to delete the uploaded file from its SD card.
+     * Best-effort: failures are logged but never fail the upload response.
+     */
+    private function sendDeleteFileCommand(Device $device, string $sdFilename): void
+    {
+        try {
+            $host = Setting::get('mqtt_host', env('MQTT_HOST'));
+            $port = (int) Setting::get('mqtt_port', env('MQTT_PORT', 8883));
+            $username = Setting::get('mqtt_username', env('MQTT_USERNAME'));
+            $password = Setting::get('mqtt_password', env('MQTT_PASSWORD'));
+
+            $clientId = 'laravel_upload_' . uniqid();
+            $mqtt = new MqttClient($host, $port, $clientId);
+
+            $connectionSettings = (new ConnectionSettings)
+                ->setUsername($username)
+                ->setPassword($password)
+                ->setUseTls(true)
+                ->setTlsSelfSignedAllowed(true)
+                ->setTlsVerifyPeer(false)
+                ->setTlsVerifyPeerName(false);
+
+            $mqtt->connect($connectionSettings, true);
+
+            $payload = json_encode([
+                'action'    => 'delete_file',
+                'timestamp' => now()->timestamp,
+                'device_id' => $device->device_id,
+                'filename'  => $sdFilename,
+            ]);
+
+            $mqtt->publish("audio/{$device->device_id}/command", $payload, 0);
+            $mqtt->disconnect();
+
+            \Log::info('delete_file command sent', [
+                'device_id' => $device->device_id,
+                'filename' => $sdFilename
+            ]);
+        } catch (\Exception $e) {
+            \Log::warning('Failed to send delete_file command (file stays on SD card)', [
+                'device_id' => $device->device_id,
+                'filename' => $sdFilename,
+                'error' => $e->getMessage()
+            ]);
+        }
     }
 }

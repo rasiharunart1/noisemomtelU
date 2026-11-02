@@ -196,12 +196,83 @@ class DeviceController extends Controller
 
     public function startRecording(Request $request, Device $device)
     {
-        return $this->sendCommand($device, 'start_recording');
+        $validated = $request->validate([
+            'duration' => 'nullable|integer|min:5|max:14400', // seconds, up to 4 hours
+        ]);
+
+        $duration = (int) ($validated['duration'] ?? 0);
+
+        return $this->sendCommand($device, 'start_recording', [
+            'duration' => $duration,
+        ]);
     }
 
     public function stopRecording(Request $request, Device $device)
     {
         return $this->sendCommand($device, 'stop_recording');
+    }
+
+    /**
+     * Ask the device to upload a recording that is still on its SD card.
+     * The device publishes upload progress on its recording_status topic.
+     */
+    public function requestRecording(Request $request, Device $device, AudioRecording $recording)
+    {
+        if ($recording->device_id !== $device->id) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Recording does not belong to this device'
+            ], 403);
+        }
+
+        if ($recording->status === 'completed') {
+            return response()->json([
+                'success' => true,
+                'message' => 'Recording already uploaded',
+                'status' => 'completed'
+            ]);
+        }
+
+        if (empty($recording->sd_filename)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Recording has no SD card filename'
+            ], 400);
+        }
+
+        $recording->update(['status' => 'requested']);
+        $device->update(['status' => 'online']);
+
+        return $this->sendCommand($device, 'upload_file', [
+            'filename' => $recording->sd_filename,
+        ]);
+    }
+
+    /**
+     * Poll the current status of a recording (used by the UI while waiting
+     * for an on-demand upload to finish).
+     */
+    public function recordingStatus(Device $device, AudioRecording $recording)
+    {
+        if ($recording->device_id !== $device->id) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Recording does not belong to this device'
+            ], 403);
+        }
+
+        $recording->refresh();
+
+        return response()->json([
+            'success' => true,
+            'status' => $recording->status,
+            'uploaded_at' => $recording->uploaded_at,
+            'file_size_bytes' => $recording->file_size_bytes,
+            'path' => $recording->path,
+            'download_url' => $recording->status === 'completed'
+                ? route('recordings.download', $recording)
+                : null,
+        ]);
     }
 
     public function resetWifi(Request $request, Device $device)
