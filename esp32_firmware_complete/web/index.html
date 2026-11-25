@@ -292,7 +292,7 @@ function render(s){
  $('sdPn').textContent=D.pending+' ('+fmtMb(D.pending_mb)+')';$('sdUn').textContent=D.uploaded+' ('+fmtMb(D.uploaded_mb)+')';
  // system
  kv('kvNet',[['WiFi network',esc(s.wifi.ssid||'not set')],['WiFi status',s.wifi.connected?'Connected':'Not connected'],['Signal',s.wifi.connected?s.wifi.rssi+' dBm':'-'],['IP on WiFi',esc(s.wifi.ip)],['Hotspot',esc(s.ap.ssid)],['Hotspot IP',esc(s.ap.ip)],['Hotspot clients',s.ap.clients],['Cloud (MQTT)',s.mqtt?'Connected':'Offline'],['Upload server',esc(s.server)]]);
- kv('kvDev',[['Device ID',esc(s.id)],['Firmware',esc(s.fw)],['Uptime',fmtUp(s.uptime)],['Clock',s.time?new Date(s.time*1000).toLocaleString():'-'],['Clock source',s.time_ok?'NTP / browser':'not set'],['Free RAM',Math.round(s.heap/1024)+' KB (min '+Math.round(s.heap_min/1024)+' KB)'],['Last reset',esc(s.reset)],['Boot count',s.boot]]);
+ kv('kvDev',[['Device ID',esc(s.id)],['Firmware',esc(s.fw)],['Uptime',fmtUp(s.uptime)],['Clock',s.time?new Date(s.time*1000).toLocaleString():'-'],['Clock source',s.time_ok?'NTP / browser':'not set'],['Free RAM',Math.round(s.heap/1024)+' KB (min '+Math.round(s.heap_min/1024)+' KB)'],['Largest RAM block',Math.round((s.heap_max||0)/1024)+' KB'+((s.heap_max||0)<45000?' (low for HTTPS)':'')],['Last reset',esc(s.reset)],['Boot count',s.boot]]);
  kv('kvSd',[['Status',D.ok?'OK':'Not detected'],['Free',fmtMb(D.free_mb)+' of '+fmtMb(D.total_mb)],['Slowest write',D.max_write+' ms'],['Slow writes (>300 ms)',D.slow],['Write errors',D.errors]]);
  // give the device the correct time when it has no internet
  if(!s.time_ok&&!timeSent){timeSent=true;post('/api/cmd',{action:'time',epoch:Math.floor(Date.now()/1000)}).then(()=>toast('Device clock set from this browser')).catch(()=>{})}

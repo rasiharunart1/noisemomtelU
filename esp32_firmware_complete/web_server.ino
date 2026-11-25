@@ -118,6 +118,7 @@ void handleStatus() {
   doc["uptime"] = millis() / 1000;
   doc["heap"] = ESP.getFreeHeap();
   doc["heap_min"] = ESP.getMinFreeHeap();
+  doc["heap_max"] = ESP.getMaxAllocHeap(); // blok terbesar (TLS butuh ~40 KB)
   doc["reset"] = resetReasonText();
   doc["boot"] = bootCount;
 

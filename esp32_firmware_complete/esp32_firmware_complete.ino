@@ -78,7 +78,7 @@
 #endif
 #include "web_ui.h"
 
-#define FW_VERSION "4.0.0"
+#define FW_VERSION "4.0.1"
 
 // ============================================================================
 // Configuration
@@ -271,6 +271,9 @@ char currentUploadPath[MAX_PATH_LEN] = "";
 unsigned long nextAutoUploadAt = 0;
 unsigned long uploadBackoffMs = UPLOAD_BACKOFF_MIN_MS;
 char lastUploadError[48] = "";
+// MQTT diputus sementara selama upload karena RAM tidak cukup untuk dua sesi
+// TLS sekaligus; loop() menyambungkannya lagi setelah upload selesai.
+bool mqttPausedForUpload = false;
 // upload_all: upload semua file yang belum ter-upload sekarang juga
 bool uploadAllActive = false;
 uint16_t uploadAllOk = 0;
@@ -1166,6 +1169,7 @@ void publishHealth() {
   doc["reset_reason"] = resetReasonText();
   doc["heap_free"] = ESP.getFreeHeap();
   doc["heap_min"] = ESP.getMinFreeHeap();
+  doc["heap_max_block"] = ESP.getMaxAllocHeap();
 
   JsonObject net = doc["wifi"].to<JsonObject>();
   net["rssi"] = WiFi.RSSI();
@@ -1383,10 +1387,38 @@ int postChunk(File &file, UploadCtx &ctx, uint32_t offset, uint32_t len,
     client = &secure;
   }
 
-  if (!client->connect(SERVER_HOST, SERVER_PORT)) {
-    setUploadError(serverUsesTls() ? "tls_connect_failed"
-                                   : "server_unreachable");
+  bool connected = client->connect(SERVER_HOST, SERVER_PORT);
+  if (!connected && !serverUsesTls()) {
+    setUploadError("server_unreachable");
     return 0;
+  }
+  if (!connected) {
+    char err[64] = "";
+    int code = secure.lastError(err, sizeof(err));
+    Serial.printf("TLS connect failed: %d %s (free heap %u, largest block %u)\n",
+                  code, err, ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+
+    // Tanpa PSRAM, sesi TLS MQTT + sesi TLS upload sering tidak muat di RAM.
+    // Lepas sesi MQTT selama upload, lalu coba sekali lagi.
+    if (mqttClient.connected()) {
+      Serial.println("Pausing MQTT during the upload to free memory");
+      mqttClient.disconnect();
+      espClient.stop();
+      mqttPausedForUpload = true;
+      secure.stop();
+      delay(100);
+      connected = secure.connect(SERVER_HOST, SERVER_PORT);
+      if (!connected) {
+        code = secure.lastError(err, sizeof(err));
+        Serial.printf("TLS retry failed: %d %s (free heap %u, largest block %u)\n",
+                      code, err, ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+      }
+    }
+    if (!connected) {
+      snprintf(lastUploadError, sizeof(lastUploadError), "tls_error_%d_ram_%uk",
+               code, ESP.getMaxAllocHeap() / 1024);
+      return 0;
+    }
   }
 
   const String boundary = "----NoisemonBoundary7MA4YWxkTrZu0gW";
@@ -1563,6 +1595,10 @@ UploadResult uploadFile(const char *path) {
   file.close();
   isUploading = false;
   currentUploadPath[0] = '\0';
+  if (mqttPausedForUpload) {
+    mqttPausedForUpload = false; // maintainConnections() menyambung lagi
+    Serial.println("Upload done, MQTT will reconnect");
+  }
 
   if (result == UPLOAD_OK) {
     lastUploadError[0] = '\0';
