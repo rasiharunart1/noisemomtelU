@@ -3,206 +3,178 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Models\Device;
 use App\Models\AudioRecording;
-use App\Models\Setting;
+use App\Models\Device;
+use App\Services\DeviceCommandService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
-use PhpMqtt\Client\MqttClient;
-use PhpMqtt\Client\ConnectionSettings;
 
 class AudioUploadController extends Controller
 {
     /**
      * Handle the incoming audio recording upload from ESP32.
-     * 
-     * @param Request $request
-     * @return \Illuminate\Http\JsonResponse
+     *
+     * The device keeps its own copy on the SD card. The server copy is
+     * stored under storage/app/public/recordings/{device_id}/.
      */
-    public function upload(Request $request)
+    public function upload(Request $request, DeviceCommandService $commands)
     {
-        // Log incoming request for debugging
-        \Log::info('Audio upload request received', [
+        Log::info('Audio upload request received', [
             'device_id' => $request->input('device_id'),
+            'sd_filename' => $request->input('sd_filename'),
             'has_file' => $request->hasFile('audio'),
-            'content_type' => $request->header('Content-Type')
         ]);
 
         $validator = Validator::make($request->all(), [
-            'device_id' => 'required|exists:devices,device_id',
-            'token'     => 'required|string',
-            'audio'     => 'required|file|mimes:wav,mp3,bin,aac|max:512000', // 500MB max (long SD recordings)
-            'duration'  => 'nullable|integer',
+            'device_id'   => 'required|exists:devices,device_id',
+            'token'       => 'required|string',
+            'audio'       => 'required|file|mimes:wav,mp3,bin,aac|max:512000', // 500MB max (long SD recordings)
+            'duration'    => 'nullable|integer|min:0',
+            'sd_filename' => 'nullable|string|max:255',
         ]);
 
         if ($validator->fails()) {
-            \Log::warning('Audio upload validation failed', [
+            Log::warning('Audio upload validation failed', [
                 'errors' => $validator->errors()->toArray()
             ]);
             return response()->json([
                 'success' => false,
                 'error' => 'Validation failed',
                 'details' => $validator->errors()
-            ], 400);
+            ], 422);
         }
 
         $device = Device::where('device_id', $request->device_id)->first();
 
-        // Security check: Verify token
-        // Note: tokens are stored encrypted in the model
-        if ($device->token !== $request->token) {
-            \Log::warning('Invalid device token', [
-                'device_id' => $request->device_id
-            ]);
+        if (!hash_equals((string) $device->token, (string) $request->token)) {
+            Log::warning('Invalid device token', ['device_id' => $request->device_id]);
             return response()->json([
                 'success' => false,
                 'error' => 'Invalid device token'
             ], 403);
         }
 
-        if ($request->hasFile('audio')) {
-            $file = $request->file('audio');
-            
-            // Validate file is readable
-            if (!$file->isValid()) {
-                \Log::error('Uploaded file is not valid', [
-                    'device_id' => $device->device_id,
-                    'error' => $file->getError()
-                ]);
-                return response()->json([
-                    'success' => false,
-                    'error' => 'File upload failed'
-                ], 400);
+        $file = $request->file('audio');
+        if (!$file->isValid()) {
+            Log::error('Uploaded file is not valid', [
+                'device_id' => $device->device_id,
+                'error' => $file->getError()
+            ]);
+            return response()->json([
+                'success' => false,
+                'error' => 'File upload failed'
+            ], 400);
+        }
+
+        // PHP strips directories from the multipart filename, so the device
+        // sends its full SD card path separately. Older firmware only sends
+        // the filename (stored at the SD root).
+        $sdFilename = $request->input('sd_filename')
+            ?: '/' . ltrim($file->getClientOriginalName(), '/');
+        if (!str_starts_with($sdFilename, '/')) {
+            $sdFilename = '/' . $sdFilename;
+        }
+
+        $existing = AudioRecording::forSdFile($device->id, $sdFilename)->first();
+
+        $directory = 'recordings/' . $device->device_id;
+        $filename = $this->serverFilename($directory, $sdFilename, $existing);
+
+        try {
+            $path = $file->storeAs($directory, $filename, 'public');
+            if ($path === false) {
+                throw new \RuntimeException('storeAs returned false');
             }
 
-            // The ESP32 reports the SD card path (e.g. /rec_ESP32-XXX_123.wav)
-            // as the original filename. Use it to match an existing on-device
-            // record so a re-upload updates instead of duplicating.
-            $sdFilename = $file->getClientOriginalName();
-            $existing = AudioRecording::where('device_id', $device->id)
-                ->where('sd_filename', $sdFilename)
-                ->first();
+            $attributes = [
+                'filename'         => $filename,
+                'path'             => $path,
+                'duration_seconds' => $request->filled('duration')
+                    ? (int) $request->input('duration')
+                    : $existing?->duration_seconds,
+                'file_size_bytes'  => $file->getSize(),
+                'status'           => 'completed',
+                'uploaded_at'      => now()->timestamp,
+                // The device keeps its copy (moved to /rec/up) unless the
+                // delete_file command below removes it
+                'sd_filename'      => $sdFilename,
+                'on_sd'            => true,
+                'sd_checked_at'    => now(),
+            ];
 
-            $filename = 'rec_' . $device->device_id . '_' . time() . '.' . $file->getClientOriginalExtension();
-            
-            try {
-                // Store in public disk
-                $path = $file->storeAs('recordings', $filename, 'public');
-
-                if ($existing) {
-                    // Replace the stored file of the previous attempt, if any
-                    if ($existing->path && $existing->path !== $path) {
-                        Storage::disk('public')->delete($existing->path);
-                    }
-                    $existing->update([
-                        'filename'         => $filename,
-                        'path'             => $path,
-                        'duration_seconds' => $request->input('duration', $existing->duration_seconds),
-                        'file_size_bytes'  => $file->getSize(),
-                        'status'           => 'completed',
-                        'uploaded_at'      => now()->timestamp,
-                    ]);
-                    $recording = $existing;
-                } else {
-                    // Save to database
-                    $recording = AudioRecording::create([
-                        'device_id'        => $device->id,
-                        'filename'         => $filename,
-                        'path'             => $path,
-                        'sd_filename'      => $sdFilename,
-                        'duration_seconds' => $request->input('duration'),
-                        'file_size_bytes'  => $file->getSize(),
-                        'status'           => 'completed',
-                        'uploaded_at'      => now()->timestamp,
-                    ]);
+            if ($existing) {
+                // Replace the stored file of a previous upload, if any
+                if ($existing->path && $existing->path !== $path) {
+                    Storage::disk('public')->delete($existing->path);
                 }
-
-                \Log::info('Audio uploaded successfully', [
-                    'device_id' => $device->device_id,
-                    'filename' => $filename,
-                    'size' => $file->getSize(),
-                    'recording_id' => $recording->id
+                $existing->update($attributes);
+                $recording = $existing;
+            } else {
+                $recording = AudioRecording::create($attributes + [
+                    'device_id' => $device->id,
                 ]);
+            }
 
-                // Tell the device to free up SD card space now that the
-                // recording is safely stored on the server.
-                $this->sendDeleteFileCommand($device, $sdFilename);
+            $device->update(['last_seen' => now()]);
 
-                return response()->json([
-                    'success' => true,
-                    'message' => 'Audio uploaded successfully',
-                    'id'      => $recording->id,
-                    'filename' => $filename,
-                    'size'    => $file->getSize()
-                ], 201);
+            Log::info('Audio uploaded successfully', [
+                'device_id' => $device->device_id,
+                'filename' => $filename,
+                'size' => $file->getSize(),
+                'recording_id' => $recording->id
+            ]);
+        } catch (\Exception $e) {
+            Log::error('Failed to save audio recording', [
+                'device_id' => $device->device_id,
+                'error' => $e->getMessage()
+            ]);
+            return response()->json([
+                'success' => false,
+                'error' => 'Failed to save recording'
+            ], 500);
+        }
 
+        // By default the recording stays on the SD card as a second copy.
+        // Only free SD space when the admin enabled it in Settings.
+        if (DeviceCommandService::deleteFromSdAfterUpload()) {
+            try {
+                $commands->send($device->device_id, 'delete_file', ['filename' => $sdFilename]);
             } catch (\Exception $e) {
-                \Log::error('Failed to save audio recording', [
+                Log::warning('Failed to send delete_file command (file stays on SD card)', [
                     'device_id' => $device->device_id,
+                    'filename' => $sdFilename,
                     'error' => $e->getMessage()
                 ]);
-                return response()->json([
-                    'success' => false,
-                    'error' => 'Failed to save recording'
-                ], 500);
             }
         }
 
-        \Log::warning('No audio file found in request', [
-            'device_id' => $request->device_id
-        ]);
         return response()->json([
-            'success' => false,
-            'error' => 'No audio file found'
-        ], 400);
+            'success'  => true,
+            'message'  => 'Audio uploaded successfully',
+            'id'       => $recording->id,
+            'filename' => $filename,
+            'size'     => $file->getSize()
+        ], 201);
     }
 
     /**
-     * Ask the device to delete the uploaded file from its SD card.
-     * Best-effort: failures are logged but never fail the upload response.
+     * Name the server copy after the SD file (e.g. ESP32-XXX_20261125_143000.wav)
+     * without overwriting a file that belongs to another recording.
      */
-    private function sendDeleteFileCommand(Device $device, string $sdFilename): void
+    private function serverFilename(string $directory, string $sdFilename, ?AudioRecording $existing): string
     {
-        try {
-            $host = Setting::get('mqtt_host', env('MQTT_HOST'));
-            $port = (int) Setting::get('mqtt_port', env('MQTT_PORT', 8883));
-            $username = Setting::get('mqtt_username', env('MQTT_USERNAME'));
-            $password = Setting::get('mqtt_password', env('MQTT_PASSWORD'));
+        $base = pathinfo($sdFilename, PATHINFO_FILENAME);
+        $base = preg_replace('/[^A-Za-z0-9_\-]/', '_', $base) ?: 'rec';
+        $filename = $base . '.wav';
 
-            $clientId = 'laravel_upload_' . uniqid();
-            $mqtt = new MqttClient($host, $port, $clientId);
-
-            $connectionSettings = (new ConnectionSettings)
-                ->setUsername($username)
-                ->setPassword($password)
-                ->setUseTls(true)
-                ->setTlsSelfSignedAllowed(true)
-                ->setTlsVerifyPeer(false)
-                ->setTlsVerifyPeerName(false);
-
-            $mqtt->connect($connectionSettings, true);
-
-            $payload = json_encode([
-                'action'    => 'delete_file',
-                'timestamp' => now()->timestamp,
-                'device_id' => $device->device_id,
-                'filename'  => $sdFilename,
-            ]);
-
-            $mqtt->publish("audio/{$device->device_id}/command", $payload, 0);
-            $mqtt->disconnect();
-
-            \Log::info('delete_file command sent', [
-                'device_id' => $device->device_id,
-                'filename' => $sdFilename
-            ]);
-        } catch (\Exception $e) {
-            \Log::warning('Failed to send delete_file command (file stays on SD card)', [
-                'device_id' => $device->device_id,
-                'filename' => $sdFilename,
-                'error' => $e->getMessage()
-            ]);
+        $disk = Storage::disk('public');
+        $ownPath = $existing?->path;
+        if ($disk->exists("{$directory}/{$filename}") && $ownPath !== "{$directory}/{$filename}") {
+            $filename = $base . '_' . time() . '.wav';
         }
+
+        return $filename;
     }
 }

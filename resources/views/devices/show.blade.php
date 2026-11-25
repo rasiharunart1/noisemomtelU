@@ -28,14 +28,14 @@
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
                         </svg>
                     </div>
-                    <div class="absolute -bottom-1 -right-1 w-6 h-6 rounded-full border-4 border-white dark:border-gray-900 flex items-center justify-center {{ $device->status === 'online' ? 'bg-emerald-500 animate-pulse' : 'bg-gray-400' }}" id="status-indicator">
+                    <div class="absolute -bottom-1 -right-1 w-6 h-6 rounded-full border-4 border-white dark:border-gray-900 flex items-center justify-center {{ $device->isAlive() ? 'bg-emerald-500 animate-pulse' : 'bg-gray-400' }}" id="status-indicator">
                     </div>
                 </div>
                 
                 <div>
                     <h3 class="text-lg font-bold text-gray-900 dark:text-white mb-1">Device Status</h3>
                     <div class="flex items-center space-x-2 mb-2">
-                        <span class="px-3 py-1 rounded-full text-xs font-semibold {{ $device->status === 'online' ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20' : 'bg-gray-500/10 text-gray-600 dark:text-gray-400 border border-gray-500/20' }}" id="status-text">
+                        <span class="px-3 py-1 rounded-full text-xs font-semibold {{ $device->isAlive() ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20' : 'bg-gray-500/10 text-gray-600 dark:text-gray-400 border border-gray-500/20' }}" id="status-text">
                             {{ ucfirst($device->status) }}
                         </span>
                         <span class="text-xs text-gray-500 dark:text-gray-400">
@@ -208,7 +208,7 @@
                 }).addTo(map);
 
                 // Custom Icon
-                const color = "{{ $device->status === 'online' ? '#fbbf24' : '#ef4444' }}";
+                const color = "{{ $device->isAlive() ? '#fbbf24' : '#ef4444' }}";
                 const customIcon = L.divIcon({
                     html: `
                         <div class="custom-marker">
@@ -285,7 +285,7 @@
                     <div class="bg-white/5 rounded-2xl p-4 border border-white/10 text-center relative group">
                         <div class="absolute -top-2 -right-1 bg-red-600 text-white text-[8px] font-black px-1.5 py-0.5 rounded-full shadow-lg transform group-hover:scale-110 transition-transform">REMOTE</div>
                         <p class="text-[10px] font-bold text-gray-500 tracking-widest uppercase mb-1">Digital Gain</p>
-                        <span class="text-2xl font-black text-red-600" id="gain-value">{{ number_format($device->gain, 1) }}x</span>
+                        <span class="text-2xl font-black text-red-600" id="gain-value-big">{{ number_format($device->gain, 1) }}x</span>
                     </div>
                 </div>
         <!-- Frequency Chart -->
@@ -369,9 +369,9 @@
 
             <div class="flex space-x-3">
                 <button id="start-recording-btn" 
-                        {{ $device->status !== 'online' ? 'disabled' : '' }}
+                        {{ !$device->isAlive() || $device->status === 'recording' ? 'disabled' : '' }}
                         class="flex-1 px-6 py-3 bg-gradient-to-r from-emerald-500 to-emerald-600 text-white rounded-xl font-semibold shadow-lg shadow-emerald-500/30 hover:shadow-emerald-500/50 transition-all hover:scale-105 flex items-center justify-center space-x-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
-                        title="{{ $device->status !== 'online' ? 'Device must be online to record' : 'Start recording audio' }}">
+                        title="{{ !$device->isAlive() ? 'Device must be online to record' : 'Start recording audio' }}">
                     <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -404,7 +404,7 @@
     </div>
 
     <!-- Scheduled Recordings -->
-    <div class="glass-card p-6 rounded-2xl mb-8 relative overflow-hidden" x-data="{ scheduleModalOpen: false }">
+    <div class="glass-card p-6 rounded-2xl mb-8 relative overflow-hidden" x-data="{ scheduleModalOpen: {{ $errors->hasAny(['start_time', 'end_time', 'interval_minutes', 'duration_seconds']) ? 'true' : 'false' }} }">
         <div class="absolute top-0 right-0 w-64 h-64 bg-emerald-500/5 rounded-full blur-3xl -mr-32 -mt-32"></div>
 
         <div class="relative z-10">
@@ -444,8 +444,8 @@
                         @forelse($schedules as $schedule)
                         <tr class="bg-white dark:bg-transparent border-b dark:border-white/5 hover:bg-gray-50 dark:hover:bg-white/5 transition-colors">
                             <td class="px-6 py-4 font-medium text-gray-900 dark:text-white">
-                                <div>{{ $schedule->start_time->format('M d, H:i') }}</div>
-                                <div class="text-xs text-gray-500">to {{ $schedule->end_time->format('M d, H:i') }}</div>
+                                <div>{{ $schedule->start_time->copy()->setTimezone(config('app.display_timezone'))->format('M d, H:i') }}</div>
+                                <div class="text-xs text-gray-500">to {{ $schedule->end_time->copy()->setTimezone(config('app.display_timezone'))->format('M d, H:i') }}</div>
                             </td>
                             <td class="px-6 py-4">
                                 Every {{ $schedule->interval_minutes }} mins
@@ -500,6 +500,14 @@
                     
                     <form action="{{ route('devices.schedules.store', $device) }}" method="POST" class="space-y-4 relative z-10">
                         @csrf
+                        <p class="text-xs text-gray-500">Times are in {{ config('app.display_timezone') }}. The interval must be at least the recording duration.</p>
+                        @if ($errors->hasAny(['start_time', 'end_time', 'interval_minutes', 'duration_seconds']))
+                            <div class="p-3 rounded-xl bg-red-500/10 text-xs text-red-600 dark:text-red-400">
+                                @foreach ($errors->only(['start_time', 'end_time', 'interval_minutes', 'duration_seconds']) as $message)
+                                    <div>{{ $message }}</div>
+                                @endforeach
+                            </div>
+                        @endif
                         <div class="grid grid-cols-2 gap-4">
                             <div>
                                 <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">Start Time</label>
@@ -539,6 +547,105 @@
             </div>
         </template>
     </div>
+    <!-- Device Health & SD Card -->
+    <div class="glass-card p-6 rounded-2xl mb-8 relative overflow-hidden" id="health-card">
+        <div class="absolute top-0 right-0 w-64 h-64 bg-indigo-500/5 rounded-full blur-3xl -mr-32 -mt-32"></div>
+
+        <div class="relative z-10">
+            <div class="flex flex-col md:flex-row md:items-center justify-between gap-3 mb-6">
+                <div class="flex items-center space-x-3">
+                    <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-600 to-indigo-800 flex items-center justify-center shadow-lg shadow-indigo-500/30">
+                        <svg class="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                    </div>
+                    <div>
+                        <h3 class="text-lg font-bold text-gray-900 dark:text-white">Device Health &amp; SD Card</h3>
+                        <p class="text-xs text-gray-500 dark:text-gray-400">
+                            Reported by the device every 60 s &middot; <span id="health-updated">{{ $device->health_updated_at ? 'updated ' . $device->health_updated_at->diffForHumans() : 'no report yet' }}</span>
+                        </p>
+                    </div>
+                </div>
+                <div id="health-alerts" class="flex flex-wrap gap-2"></div>
+            </div>
+
+            <!-- SD usage -->
+            <div class="mb-6">
+                <div class="flex justify-between text-xs text-gray-500 dark:text-gray-400 mb-1">
+                    <span>SD card: <span class="font-semibold text-gray-900 dark:text-white" id="h-sd-state">-</span></span>
+                    <span id="h-sd-usage">-</span>
+                </div>
+                <div class="w-full h-3 bg-gray-200 dark:bg-white/10 rounded-full overflow-hidden flex">
+                    <div id="h-sd-bar-pending" class="h-full bg-amber-500 transition-all" style="width:0%" title="Not uploaded yet"></div>
+                    <div id="h-sd-bar-uploaded" class="h-full bg-emerald-500 transition-all" style="width:0%" title="Uploaded (kept as backup)"></div>
+                    <div id="h-sd-bar-other" class="h-full bg-gray-400 transition-all" style="width:0%" title="Other data"></div>
+                </div>
+                <div class="flex flex-wrap gap-4 mt-2 text-[11px] text-gray-500 dark:text-gray-400">
+                    <span class="flex items-center"><span class="w-2 h-2 rounded-full bg-amber-500 mr-1"></span>Not uploaded: <b class="ml-1 text-gray-900 dark:text-white" id="h-pending">-</b></span>
+                    <span class="flex items-center"><span class="w-2 h-2 rounded-full bg-emerald-500 mr-1"></span>Uploaded (backup on SD): <b class="ml-1 text-gray-900 dark:text-white" id="h-uploaded">-</b></span>
+                </div>
+            </div>
+
+            <!-- Stats -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6 text-xs">
+                <div class="bg-white/5 rounded-xl p-3 border border-white/10">
+                    <p class="text-[10px] font-bold text-gray-500 uppercase">Upload Queue</p>
+                    <p class="text-sm font-bold text-gray-900 dark:text-white" id="h-upload">-</p>
+                    <p class="text-[10px] text-gray-500 truncate" id="h-upload-sub">&nbsp;</p>
+                </div>
+                <div class="bg-white/5 rounded-xl p-3 border border-white/10">
+                    <p class="text-[10px] font-bold text-gray-500 uppercase">WiFi Signal</p>
+                    <p class="text-sm font-bold text-gray-900 dark:text-white" id="h-rssi">-</p>
+                    <p class="text-[10px] text-gray-500" id="h-ip">&nbsp;</p>
+                </div>
+                <div class="bg-white/5 rounded-xl p-3 border border-white/10">
+                    <p class="text-[10px] font-bold text-gray-500 uppercase">SD Write Speed</p>
+                    <p class="text-sm font-bold text-gray-900 dark:text-white" id="h-write">-</p>
+                    <p class="text-[10px] text-gray-500" id="h-write-sub">&nbsp;</p>
+                </div>
+                <div class="bg-white/5 rounded-xl p-3 border border-white/10">
+                    <p class="text-[10px] font-bold text-gray-500 uppercase">System</p>
+                    <p class="text-sm font-bold text-gray-900 dark:text-white" id="h-uptime">-</p>
+                    <p class="text-[10px] text-gray-500" id="h-system-sub">&nbsp;</p>
+                </div>
+            </div>
+
+            <!-- Actions -->
+            <div class="flex flex-wrap gap-2">
+                <button type="button" data-device-command="get_status" class="px-3 py-2 rounded-lg text-xs font-semibold bg-gray-100 dark:bg-white/5 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-white/10 transition-colors">
+                    Refresh Status
+                </button>
+                <button type="button" data-device-command="upload_all" class="px-3 py-2 rounded-lg text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+                        title="Upload every recording that is not on the server yet">
+                    Upload All Pending
+                </button>
+                <button type="button" data-device-command="upload_all" data-force="1"
+                        data-confirm="Re-upload EVERY recording on the SD card (also ones already on the server)? This can take a long time."
+                        class="px-3 py-2 rounded-lg text-xs font-semibold bg-blue-500/10 text-blue-600 dark:text-blue-400 hover:bg-blue-500/20 transition-colors">
+                    Re-upload Everything
+                </button>
+                <button type="button" data-device-command="list_files" class="px-3 py-2 rounded-lg text-xs font-semibold bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/20 transition-colors"
+                        title="Compare the recordings table with the files on the SD card">
+                    Sync SD File List
+                </button>
+                <button type="button" id="auto-upload-btn" data-device-command="set_auto_upload" class="px-3 py-2 rounded-lg text-xs font-semibold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20 transition-colors">
+                    Auto Upload: <span id="auto-upload-state">?</span>
+                </button>
+                <button type="button" data-device-command="delete_uploaded"
+                        data-confirm="Delete all recordings that are already stored on the server from the device's SD card? Recordings not uploaded yet are kept."
+                        class="px-3 py-2 rounded-lg text-xs font-semibold bg-amber-500/10 text-amber-700 dark:text-amber-400 hover:bg-amber-500/20 transition-colors">
+                    Free SD Space
+                </button>
+                <button type="button" data-device-command="restart"
+                        data-confirm="Restart the device? An active recording is closed properly first."
+                        class="px-3 py-2 rounded-lg text-xs font-semibold bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-500/20 transition-colors">
+                    Restart Device
+                </button>
+            </div>
+            <p class="mt-3 text-xs text-gray-500 dark:text-gray-400 min-h-[1rem]" id="command-feedback"></p>
+        </div>
+    </div>
+
     <div class="glass-card p-6 rounded-2xl mb-8 relative overflow-hidden group" x-data="{ wifiModalOpen: false }">
         <div class="absolute top-0 right-0 w-64 h-64 bg-blue-500/5 rounded-full blur-3xl -mr-32 -mt-32 transition-all group-hover:bg-blue-500/10"></div>
         
@@ -563,7 +670,7 @@
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <!-- Update WiFi Button -->
                 <button @click="wifiModalOpen = true"
-                        {{ $device->status !== 'online' ? 'disabled' : '' }}
+                        {{ !$device->isAlive() ? 'disabled' : '' }}
                         class="px-6 py-4 bg-white/5 dark:bg-white/5 text-gray-900 dark:text-white border border-gray-200 dark:border-white/10 rounded-2xl font-bold hover:bg-blue-500/5 hover:border-blue-500/30 hover:text-blue-600 dark:hover:text-blue-400 transition-all flex items-center justify-center space-x-3 group/btn disabled:opacity-50 disabled:cursor-not-allowed shadow-sm">
                     <div class="w-8 h-8 rounded-lg bg-blue-500/10 flex items-center justify-center group-hover/btn:bg-blue-500 group-hover/btn:text-white transition-colors">
                         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -578,7 +685,7 @@
 
                 <!-- Reset to AP Button -->
                 <button onclick="resetWifiToAP()"
-                        {{ $device->status !== 'online' ? 'disabled' : '' }}
+                        {{ !$device->isAlive() ? 'disabled' : '' }}
                         class="px-6 py-4 bg-gradient-to-br from-orange-500 to-red-600 text-white rounded-2xl font-bold shadow-lg shadow-orange-500/20 hover:shadow-orange-500/40 hover:scale-[1.02] active:scale-[0.98] transition-all flex items-center justify-center space-x-3 disabled:opacity-50 disabled:cursor-not-allowed group/reset">
                     <div class="w-8 h-8 rounded-lg bg-white/20 flex items-center justify-center group-hover/reset:rotate-12 transition-transform">
                         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -725,7 +832,7 @@
                     <svg class="w-5 h-5 mr-2 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
                     </svg>
-                    Audio Recordings (SD Card Uploads)
+                    Audio Recordings (SD Card + Server)
                 </h3>
                 <span class="text-xs text-gray-500 font-medium">{{ $recordings->count() }} Recordings</span>
             </div>
@@ -751,6 +858,7 @@
                         <th class="px-6 py-4 font-semibold text-left">Filename</th>
                         <th class="px-6 py-4 font-semibold text-right">Size</th>
                         <th class="px-6 py-4 font-semibold text-center">Status</th>
+                        <th class="px-6 py-4 font-semibold text-center">Storage</th>
                         <th class="px-6 py-4 font-semibold text-center">Listen</th>
                         <th class="px-6 py-4 font-semibold text-right">Actions</th>
                     </tr>
@@ -772,17 +880,29 @@
                             </td>
                             <td class="px-6 py-4 text-center">
                                 @if($rec->status === 'completed')
-                                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800 dark:bg-emerald-500/10 dark:text-emerald-400" data-recording-status="{{ $rec->id }}">Uploaded</span>
+                                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800 dark:bg-emerald-500/10 dark:text-emerald-400" data-recording-status="{{ $rec->id }}" data-sd-filename="{{ $rec->sd_filename }}">Uploaded</span>
                                 @elseif($rec->status === 'on_device')
-                                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-500/10 dark:text-amber-400" data-recording-status="{{ $rec->id }}">On SD Card</span>
+                                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-500/10 dark:text-amber-400" data-recording-status="{{ $rec->id }}" data-sd-filename="{{ $rec->sd_filename }}">On SD Card</span>
                                 @elseif($rec->status === 'requested')
-                                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-500/10 dark:text-blue-400" data-recording-status="{{ $rec->id }}">Requested</span>
+                                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-500/10 dark:text-blue-400" data-recording-status="{{ $rec->id }}" data-sd-filename="{{ $rec->sd_filename }}">Requested</span>
                                 @elseif($rec->status === 'uploading')
-                                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-500/10 dark:text-blue-400 animate-pulse" data-recording-status="{{ $rec->id }}">Uploading...</span>
+                                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-500/10 dark:text-blue-400 animate-pulse" data-recording-status="{{ $rec->id }}" data-sd-filename="{{ $rec->sd_filename }}">Uploading...</span>
                                 @elseif($rec->status === 'upload_failed')
-                                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-500/10 dark:text-red-400" data-recording-status="{{ $rec->id }}">Upload Failed</span>
+                                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-500/10 dark:text-red-400" data-recording-status="{{ $rec->id }}" data-sd-filename="{{ $rec->sd_filename }}">Upload Failed</span>
                                 @else
-                                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-white/10 dark:text-gray-400" data-recording-status="{{ $rec->id }}">{{ ucfirst($rec->status) }}</span>
+                                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-white/10 dark:text-gray-400" data-recording-status="{{ $rec->id }}" data-sd-filename="{{ $rec->sd_filename }}">{{ ucfirst($rec->status) }}</span>
+                                @endif
+                            </td>
+                            <td class="px-6 py-4 text-center whitespace-nowrap">
+                                @if($rec->isOnServer())
+                                    <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800 dark:bg-emerald-500/10 dark:text-emerald-400" title="Stored on the server">Server</span>
+                                @endif
+                                @if($rec->on_sd === true)
+                                    <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-semibold bg-indigo-100 text-indigo-800 dark:bg-indigo-500/10 dark:text-indigo-400" title="Copy on the device's SD card{{ $rec->sd_checked_at ? ' (checked ' . $rec->sd_checked_at->diffForHumans() . ')' : '' }}">SD &#10003;</span>
+                                @elseif($rec->on_sd === false)
+                                    <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-semibold bg-gray-100 text-gray-600 dark:bg-white/10 dark:text-gray-400" title="No longer on the SD card">SD &#10007;</span>
+                                @else
+                                    <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-semibold bg-gray-100 text-gray-500 dark:bg-white/5 dark:text-gray-500" title="Unknown - use Sync SD File List">SD ?</span>
                                 @endif
                             </td>
                             <td class="px-6 py-4">
@@ -800,7 +920,7 @@
                             <td class="px-6 py-4 text-right whitespace-nowrap">
                                 @if($rec->status === 'completed' && $rec->path)
                                     <a href="{{ route('recordings.download', $rec) }}" class="text-red-600 hover:text-red-500 font-medium text-xs">Download</a>
-                                @elseif(in_array($rec->status, ['on_device', 'upload_failed', 'requested']))
+                                @elseif(in_array($rec->status, ['on_device', 'upload_failed', 'requested', 'uploading']) && $rec->on_sd !== false)
                                     <button type="button"
                                             data-fetch-recording="{{ $rec->id }}"
                                             data-fetch-url="{{ route('devices.recordings.request', [$device, $rec]) }}"
@@ -815,7 +935,7 @@
                         </tr>
                     @empty
                         <tr>
-                            <td colspan="7" class="px-6 py-8 text-center text-gray-500 italic">No recordings yet</td>
+                            <td colspan="8" class="px-6 py-8 text-center text-gray-500 italic">No recordings yet</td>
                         </tr>
                     @endforelse
                 </tbody>
@@ -984,13 +1104,20 @@
         @endif
 
         // --- MQTT Realtime Update ---
-        
+
         // Update credentials from backend
-        const mqttHost = "{{ config('mqtt.host', env('MQTT_HOST')) }}";
+        const mqttHost = "{{ config('mqtt.host') }}";
         const mqttPort = "8884"; // WebSocket Port
-        const mqttUser = "{{ config('mqtt.username', env('MQTT_USERNAME')) }}"; 
-        const mqttPass = "{{ config('mqtt.password', env('MQTT_PASSWORD')) }}";
+        const mqttUser = "{{ config('mqtt.username') }}";
+        const mqttPass = "{{ config('mqtt.password') }}";
         const topic = "{{ $device->mqtt_topic }}";
+        const deviceBase = 'audio/{{ $device->device_id }}';
+        const topics = {
+            data: topic,
+            status: topic.replace('/data', '/status'),
+            recording: deviceBase + '/recording_status',
+            health: deviceBase + '/health',
+        };
 
         console.log(`Connecting to wss://${mqttHost}:${mqttPort}/mqtt...`);
 
@@ -1002,86 +1129,116 @@
 
         client.on('connect', () => {
             console.log('Connected to MQTT!');
-            client.subscribe(topic);
-            console.log('Subscribed to:', topic);
-
-            // Subscribe to status topic
-            const statusTopic = topic.replace('/data', '/status');
-            client.subscribe(statusTopic);
-            console.log('Subscribed to:', statusTopic);
+            // health is retained: the broker sends the last report right away
+            client.subscribe(Object.values(topics));
+            console.log('Subscribed to:', Object.values(topics));
         });
 
-        client.on('message', (topic, message) => {
+        // One router: each topic carries a different kind of "status"
+        client.on('message', (msgTopic, message) => {
+            let data;
             try {
-                const data = JSON.parse(message.toString());
-                const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-
-                // Handle Status Update
-                if (data.status) {
-                    const indicator = document.getElementById('status-indicator');
-                    const text = document.getElementById('status-text');
-                    
-                    if (data.status === 'online') {
-                        indicator.className = "absolute -bottom-1 -right-1 w-6 h-6 rounded-full border-4 border-white dark:border-gray-900 flex items-center justify-center bg-emerald-500 animate-pulse";
-                        text.className = "px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20";
-                        text.innerHTML = "Online";
-                    } else {
-                        indicator.className = "absolute -bottom-1 -right-1 w-6 h-6 rounded-full border-4 border-white dark:border-gray-900 flex items-center justify-center bg-gray-400";
-                        text.className = "px-3 py-1 rounded-full text-xs font-semibold bg-gray-500/10 text-gray-600 dark:text-gray-400 border border-gray-500/20";
-                        text.innerHTML = "Offline";
-                    }
-                    // return; // REMOVED: Allow processing other data even if status is present
+                data = JSON.parse(message.toString());
+            } catch (e) {
+                console.error('Error parsing MQTT message:', e);
+                return;
+            }
+            try {
+                if (msgTopic === topics.data || msgTopic === topics.status) {
+                    handleDeviceData(data);
+                } else if (msgTopic === topics.recording) {
+                    handleRecordingStatusMessage(data);
+                } else if (msgTopic === topics.health) {
+                    renderHealth(data, null);
                 }
+            } catch (e) {
+                console.error('Error handling MQTT message:', e);
+            }
+        });
 
-                // Update Big Numbers (Safety Checks Added)
-                if (data.audio) {
-                    if (data.audio.rms !== undefined && data.audio.rms !== null) {
-                        document.getElementById('current-rms').innerText = Number(data.audio.rms).toFixed(4);
-                    }
-                    if (data.audio.db_spl !== undefined && data.audio.db_spl !== null) {
-                        document.getElementById('current-db-spl').innerText = Number(data.audio.db_spl).toFixed(1);
-                    }
+        function setDeviceStatus(status) {
+            const indicator = document.getElementById('status-indicator');
+            const text = document.getElementById('status-text');
+            const alive = status === 'online' || status === 'recording';
+
+            if (alive) {
+                indicator.className = "absolute -bottom-1 -right-1 w-6 h-6 rounded-full border-4 border-white dark:border-gray-900 flex items-center justify-center bg-emerald-500 animate-pulse";
+                text.className = "px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20";
+                text.innerHTML = status === 'recording' ? "Recording" : "Online";
+                if (status === 'online' && !deviceRecording) {
+                    startRecordingBtn.disabled = false;
+                    startRecordingBtn.title = "Start recording audio";
                 }
-                if (data.fft) {
-                    if (data.fft.peak_frequency !== undefined && data.fft.peak_frequency !== null) {
-                        document.getElementById('current-freq').innerText = Number(data.fft.peak_frequency).toFixed(0);
-                    }
+            } else {
+                indicator.className = "absolute -bottom-1 -right-1 w-6 h-6 rounded-full border-4 border-white dark:border-gray-900 flex items-center justify-center bg-gray-400";
+                text.className = "px-3 py-1 rounded-full text-xs font-semibold bg-gray-500/10 text-gray-600 dark:text-gray-400 border border-gray-500/20";
+                text.innerHTML = "Offline";
+                startRecordingBtn.disabled = true;
+                startRecordingBtn.title = "Device must be online to record";
+                stopRecordingBtn.disabled = true;
+            }
+        }
+
+        // audio/<id>/data: FFT every second ("status" only when recording/offline)
+        function handleDeviceData(data) {
+            const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+            if (data.status === 'offline') {
+                setDeviceStatus('offline');
+                return;
+            }
+            setDeviceStatus(data.status === 'recording' ? 'recording' : 'online');
+            if (data.status === 'recording' && !deviceRecording) {
+                deviceRecording = true;
+                updateRecordingStatus('recording');
+            }
+
+            // Update Big Numbers (Safety Checks Added)
+            if (data.audio) {
+                if (data.audio.rms !== undefined && data.audio.rms !== null) {
+                    document.getElementById('current-rms').innerText = Number(data.audio.rms).toFixed(4);
                 }
-                document.getElementById('last-seen').innerText = "Just now";
+                if (data.audio.db_spl !== undefined && data.audio.db_spl !== null) {
+                    document.getElementById('current-db-spl').innerText = Number(data.audio.db_spl).toFixed(1);
+                }
+            }
+            if (data.fft) {
+                if (data.fft.peak_frequency !== undefined && data.fft.peak_frequency !== null) {
+                    document.getElementById('current-freq').innerText = Number(data.fft.peak_frequency).toFixed(0);
+                }
+                if (data.fft.total_energy !== undefined) {
+                    document.getElementById('current-energy').innerText = Math.round(data.fft.total_energy);
+                }
+            }
+            document.getElementById('last-seen').innerText = "Just now";
 
-                // Update Charts only if data exists
-                if (data.audio && data.fft) {
-                    [dbSplChart, rmsChart, frequencyChart, energyChart].forEach(chart => {
-                        chart.data.labels.push(now);
-                        if (chart.data.labels.length > 50) chart.data.labels.shift();
-                    });
+            // Update Charts only if data exists
+            if (data.audio && data.fft) {
+                [dbSplChart, rmsChart, frequencyChart, energyChart].forEach(chart => {
+                    chart.data.labels.push(now);
+                    if (chart.data.labels.length > 50) chart.data.labels.shift();
+                });
 
-                    // Push new data
-                    dbSplChart.data.datasets[0].data.push(data.audio.db_spl || 0);
-                    rmsChart.data.datasets[0].data.push(data.audio.rms);
-                    frequencyChart.data.datasets[0].data.push(data.fft.peak_frequency);
-                    energyChart.data.datasets[0].data.push(data.fft.total_energy);
+                dbSplChart.data.datasets[0].data.push(data.audio.db_spl || 0);
+                rmsChart.data.datasets[0].data.push(data.audio.rms);
+                frequencyChart.data.datasets[0].data.push(data.fft.peak_frequency);
+                energyChart.data.datasets[0].data.push(data.fft.total_energy);
 
-                    // Start shifting old data
-                    [dbSplChart, rmsChart, frequencyChart, energyChart].forEach(chart => {
-                        if (chart.data.datasets[0].data.length > 50) chart.data.datasets[0].data.shift();
-                        chart.update();
-                    });
+                [dbSplChart, rmsChart, frequencyChart, energyChart].forEach(chart => {
+                    if (chart.data.datasets[0].data.length > 50) chart.data.datasets[0].data.shift();
+                    chart.update();
+                });
 
-                    // Update Band Chart
+                if (data.fft.band_energy) {
                     bandChart.data.datasets[0].data = [
                         data.fft.band_energy.low,
                         data.fft.band_energy.mid,
                         data.fft.band_energy.high
                     ];
                     bandChart.update();
-
                 }
-
-            } catch (e) {
-                console.error("Error parsing MQTT message:", e);
             }
-        });
+        }
 
         // --- Digital Gain Logic ---
         const gainSlider = document.getElementById('gain-slider');
@@ -1091,6 +1248,7 @@
         gainSlider.addEventListener('input', (e) => {
             const val = parseFloat(e.target.value).toFixed(1);
             gainValueDisp.innerText = val + 'x';
+            document.getElementById('gain-value-big').innerText = val + 'x';
             
             // Clear previous timeout to debounce API call
             clearTimeout(gainTimeout);
@@ -1182,25 +1340,28 @@
             return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
         }
 
-        // Subscribe to recording status topic
-        const recordingStatusTopic = 'audio/{{ $device->device_id }}/recording_status';
-        client.subscribe(recordingStatusTopic);
-        console.log('Subscribed to:', recordingStatusTopic);
+        // The device keeps recording while it uploads earlier files, so
+        // upload messages must not overwrite the "Recording..." state.
+        let deviceRecording = false;
+        let reloadTimer = null;
+        function scheduleReload() {
+            clearTimeout(reloadTimer);
+            reloadTimer = setTimeout(() => window.location.reload(), 1500);
+        }
 
-        // Handle recording status updates via MQTT
-        client.on('message', (topic, message) => {
-            if (topic === recordingStatusTopic) {
-                try {
-                    const data = JSON.parse(message.toString());
-                    handleRecordingStatusMessage(data);
-                } catch (e) {
-                    console.error('Error parsing recording status:', e);
+        function setRowBadge(sdFilename, text, classes) {
+            if (!sdFilename) return;
+            document.querySelectorAll('[data-sd-filename]').forEach(el => {
+                if (el.dataset.sdFilename === sdFilename) {
+                    el.textContent = text;
+                    if (classes) el.className = classes;
                 }
-            }
-        });
+            });
+        }
 
         function handleRecordingStatusMessage(data) {
             if (data.status === 'recording') {
+                deviceRecording = true;
                 updateRecordingStatus('recording');
                 // Progress update from the device
                 if (data.elapsed !== undefined) {
@@ -1217,15 +1378,36 @@
                     }
                 }
             } else if (data.status === 'completed') {
+                deviceRecording = false;
                 updateRecordingStatus('idle');
                 progressWrap.classList.add('hidden');
                 // A new file is on the SD card; reload the table
-                window.location.reload();
+                scheduleReload();
             } else if (data.status === 'uploading') {
-                updateRecordingStatus('uploading');
+                const pct = data.progress !== undefined ? ' ' + data.progress + '%' : '';
+                setRowBadge(data.filename, 'Uploading...' + pct,
+                    'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-500/10 dark:text-blue-400 animate-pulse');
+                if (!deviceRecording) updateRecordingStatus('uploading');
             } else if (data.status === 'upload_completed' || data.status === 'upload_failed') {
-                updateRecordingStatus('idle');
+                if (!deviceRecording) updateRecordingStatus('idle');
+                scheduleReload();
+            } else if (data.status === 'upload_all_started') {
+                commandFeedback.textContent = 'Device is uploading ' + (data.files || 0) + ' file(s) (' + (data.mb || 0) + ' MB)...';
+            } else if (data.status === 'upload_all_done') {
+                commandFeedback.textContent = 'Upload all finished: ' + data.uploaded + ' uploaded, ' + data.failed + ' failed'
+                    + (data.aborted ? ' (stopped: ' + (data.error || 'server unreachable') + ')' : '') + '.';
+                scheduleReload();
+            } else if (data.status === 'sd_cleaned') {
+                commandFeedback.textContent = 'Deleted ' + data.deleted + ' uploaded file(s) from the SD card.';
+                scheduleReload();
+            } else if (data.status === 'restarting') {
+                commandFeedback.textContent = 'Device is restarting...';
+            } else if (data.status === 'sd_full' || data.status === 'sd_error') {
+                alert(data.status === 'sd_full'
+                    ? 'SD card on the device is full. Recording was not started.'
+                    : 'SD card error on the device. Check the card and try again.');
             } else if (data.status === 'idle') {
+                deviceRecording = false;
                 updateRecordingStatus('idle');
                 progressWrap.classList.add('hidden');
             }
@@ -1240,59 +1422,22 @@
                      recordingStatusText.innerText = 'Uploading...';
                      recordingStatusDot.className = 'w-3 h-3 rounded-full bg-blue-500 animate-pulse';
                 }
-                startRecordingBtn.disabled = true;
-                stopRecordingBtn.disabled = (status === 'uploading'); // Disable stop if uploading
+                // Uploading does not block a new recording (the device records
+                // and uploads at the same time)
+                startRecordingBtn.disabled = (status === 'recording');
+                stopRecordingBtn.disabled = (status === 'uploading');
             } else {
                 recordingStatusText.innerText = 'Idle';
                 recordingStatusDot.className = 'w-3 h-3 rounded-full bg-gray-400';
                 progressWrap.classList.add('hidden');
                 
                 // Only enable start button if device is online
-                const deviceOnline = document.getElementById('status-text').innerText.toLowerCase().includes('online');
+                const statusText = document.getElementById('status-text').innerText.toLowerCase();
+                const deviceOnline = statusText.includes('online') || statusText.includes('recording');
                 startRecordingBtn.disabled = !deviceOnline;
                 stopRecordingBtn.disabled = true;
             }
         }
-
-        // Update button states when device status changes
-        client.on('message', (topic, message) => {
-            try {
-                const data = JSON.parse(message.toString());
-                
-                // Handle status updates
-                // Handle status updates
-                if (data.status) {
-                    const indicator = document.getElementById('status-indicator');
-                    const text = document.getElementById('status-text');
-                    
-                    if (data.status === 'online' || data.status === 'recording') {
-                        indicator.className = "absolute -bottom-1 -right-1 w-6 h-6 rounded-full border-4 border-white dark:border-gray-900 flex items-center justify-center bg-emerald-500 animate-pulse";
-                        text.className = "px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20";
-                        text.innerHTML = data.status === 'recording' ? "Recording" : "Online";
-                        
-                        // If we are recording, don't mess with buttons here, let updateRecordingStatus handle it
-                        // Only if we are JUST online (idle), we ensure start button is ready
-                        if (data.status === 'online') {
-                             if (stopRecordingBtn.disabled) {
-                                 startRecordingBtn.disabled = false;
-                                 startRecordingBtn.title = "Start recording audio";
-                             }
-                        }
-                    } else {
-                        indicator.className = "absolute -bottom-1 -right-1 w-6 h-6 rounded-full border-4 border-white dark:border-gray-900 flex items-center justify-center bg-gray-400";
-                        text.className = "px-3 py-1 rounded-full text-xs font-semibold bg-gray-500/10 text-gray-600 dark:text-gray-400 border border-gray-500/20";
-                        text.innerHTML = "Offline";
-                        
-                        // Disable recording buttons
-                        startRecordingBtn.disabled = true;
-                        startRecordingBtn.title = "Device must be online to record";
-                        stopRecordingBtn.disabled = true;
-                    }
-                }
-            } catch (e) {
-                console.error('Error in message handler:', e);
-            }
-        });
 
         startRecordingBtn.addEventListener('click', async () => {
             const minutes = parseFloat(recordingDurationInput.value) || 0;
@@ -1499,9 +1644,144 @@
             setTimeout(() => clearInterval(pollInterval), 15 * 60 * 1000);
         }
 
+        // --- Device Health (audio/<id>/health) ---
+        function fmtMb(mb) {
+            if (mb === undefined || mb === null) return '-';
+            return mb >= 1024 ? (mb / 1024).toFixed(1) + ' GB' : mb + ' MB';
+        }
+        function fmtDuration(sec) {
+            if (!sec && sec !== 0) return '-';
+            const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
+            return (d ? d + 'd ' : '') + (h || d ? h + 'h ' : '') + m + 'm';
+        }
+        function setText(id, text) {
+            const el = document.getElementById(id);
+            if (el) el.textContent = text;
+        }
+        function badge(text, color) {
+            const colors = {
+                red: 'bg-red-100 text-red-800 dark:bg-red-500/10 dark:text-red-400',
+                amber: 'bg-amber-100 text-amber-800 dark:bg-amber-500/10 dark:text-amber-400',
+            };
+            return `<span class="px-2 py-1 rounded-full text-[11px] font-semibold ${colors[color]}">${text}</span>`;
+        }
+
+        let autoUploadEnabled = null;
+
+        function renderHealth(h, updatedAt) {
+            if (!h) return;
+            const alerts = [];
+            const sd = h.sd || {};
+
+            if (sd.ok === false) {
+                setText('h-sd-state', 'not detected');
+                alerts.push(badge('SD card error', 'red'));
+            } else if (sd.total_mb) {
+                const used = sd.total_mb - sd.free_mb;
+                setText('h-sd-state', 'OK');
+                setText('h-sd-usage', fmtMb(used) + ' used / ' + fmtMb(sd.total_mb) + ' (' + fmtMb(sd.free_mb) + ' free)');
+                const pct = v => Math.max(0, Math.min(100, v / sd.total_mb * 100)) + '%';
+                document.getElementById('h-sd-bar-pending').style.width = pct(sd.pending_mb || 0);
+                document.getElementById('h-sd-bar-uploaded').style.width = pct(sd.uploaded_mb || 0);
+                document.getElementById('h-sd-bar-other').style.width = pct(Math.max(0, used - (sd.pending_mb || 0) - (sd.uploaded_mb || 0)));
+                if (sd.free_mb / sd.total_mb < 0.05) alerts.push(badge('SD almost full', 'red'));
+            }
+            if (sd.pending_files !== undefined) {
+                setText('h-pending', sd.pending_files + ' file(s), ' + fmtMb(sd.pending_mb));
+                setText('h-uploaded', sd.uploaded_files + ' file(s), ' + fmtMb(sd.uploaded_mb));
+            }
+
+            const up = h.upload || {};
+            if (up.active) {
+                setText('h-upload', 'Uploading…');
+                setText('h-upload-sub', (up.filename || '').split('/').pop());
+            } else if (sd.pending_files) {
+                setText('h-upload', sd.pending_files + ' waiting');
+                setText('h-upload-sub', up.next_retry_s ? 'next try in ' + fmtDuration(up.next_retry_s) : (up.auto ? 'starting soon' : 'auto upload off'));
+            } else {
+                setText('h-upload', 'All uploaded');
+                setText('h-upload-sub', ' ');
+            }
+            if (up.last_error) {
+                setText('h-upload-sub', 'last error: ' + up.last_error);
+                alerts.push(badge('Upload error: ' + up.last_error, 'amber'));
+            }
+            if (up.auto !== undefined) {
+                autoUploadEnabled = !!up.auto;
+                setText('auto-upload-state', autoUploadEnabled ? 'ON' : 'OFF');
+            }
+
+            const wifi = h.wifi || {};
+            if (wifi.rssi !== undefined) {
+                const q = wifi.rssi >= -60 ? 'good' : wifi.rssi >= -70 ? 'fair' : 'weak';
+                setText('h-rssi', wifi.rssi + ' dBm (' + q + ')');
+                setText('h-ip', (wifi.ip || '') + (wifi.ntp === false ? ' · clock not synced' : ''));
+                if (q === 'weak') alerts.push(badge('Weak WiFi', 'amber'));
+            }
+
+            if (sd.max_write_ms !== undefined) {
+                setText('h-write', 'max ' + sd.max_write_ms + ' ms');
+                setText('h-write-sub', (sd.slow_writes || 0) + ' slow · ' + (sd.write_errors || 0) + ' errors');
+                if (sd.slow_writes > 0) alerts.push(badge('Slow SD writes (audio gaps possible)', 'amber'));
+                if (sd.write_errors > 0) alerts.push(badge('SD write errors', 'red'));
+            }
+
+            setText('h-uptime', 'Up ' + fmtDuration(h.uptime));
+            setText('h-system-sub', 'fw ' + (h.fw || '?') + ' · RAM ' + Math.round((h.heap_free || 0) / 1024) + ' KB · reset: ' + (h.reset_reason || '?'));
+            if (['crash', 'watchdog', 'brownout'].includes(h.reset_reason)) {
+                alerts.push(badge('Last reset: ' + h.reset_reason, 'red'));
+            }
+
+            document.getElementById('health-alerts').innerHTML = alerts.join('');
+            if (updatedAt) {
+                setText('health-updated', 'updated ' + updatedAt);
+            } else {
+                setText('health-updated', 'updated ' + new Date().toLocaleTimeString());
+            }
+        }
+
+        renderHealth(@json($device->health), @json($device->health_updated_at?->diffForHumans()));
+
+        // --- Device commands (SD card / maintenance) ---
+        const commandFeedback = document.getElementById('command-feedback');
+        document.querySelectorAll('[data-device-command]').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                if (btn.dataset.confirm && !confirm(btn.dataset.confirm)) return;
+
+                const body = { action: btn.dataset.deviceCommand };
+                if (btn.dataset.force) body.force = true;
+                if (body.action === 'set_auto_upload') body.enabled = autoUploadEnabled === false;
+
+                btn.disabled = true;
+                try {
+                    const response = await fetch("{{ route('devices.command', $device) }}", {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Accept': 'application/json',
+                            'X-CSRF-TOKEN': '{{ csrf_token() }}'
+                        },
+                        body: JSON.stringify(body)
+                    });
+                    const result = await response.json();
+                    if (result.success && body.action === 'list_files') {
+                        setTimeout(() => window.location.reload(), 6000);
+                    }
+                    commandFeedback.textContent = result.success
+                        ? 'Sent: ' + body.action.replace(/_/g, ' ') + '. The device answers within a few seconds if it is online.'
+                        : 'Failed: ' + (result.message || 'unknown error');
+                } catch (err) {
+                    commandFeedback.textContent = 'Failed to send command.';
+                    console.error(err);
+                } finally {
+                    setTimeout(() => btn.disabled = false, 2000);
+                }
+            });
+        });
+
         // --- WiFi Management Logic ---
         async function resetWifiToAP() {
-            if (!confirm('WARNING: This will clear WiFi credentials on the device.\nThe device will restart and create a temporary "Noisemon_Setup" Hotspot.\nYou need to reconnect to it to configure new WiFi.\n\nContinue?')) return;
+            if (!confirm('WARNING: This will clear WiFi credentials on the device.\nThe device will restart and create a temporary "Noisemon_{{ $device->device_id }}" Hotspot.\nYou need to reconnect to it to configure new WiFi.\n\nContinue?')) return;
 
             try {
                 const response = await fetch("{{ route('devices.wifi.reset', $device) }}", {

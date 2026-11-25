@@ -68,12 +68,16 @@ class ArchiveDailyLogs extends Command
             'Band Low', 'Band Mid', 'Band High', 'Creation Time'
         ]);
 
+        // Only archive rows that exist now; logs arriving during the export
+        // stay in the table for the next run.
+        $maxId = FftLog::max('id');
+
         // Process in chunks to avoid memory limit
-        FftLog::orderBy('created_at')->chunk(1000, function ($logs) use ($handle) {
+        FftLog::with('device')->where('id', '<=', $maxId)->chunkById(1000, function ($logs) use ($handle) {
             foreach ($logs as $log) {
                 fputcsv($handle, [
                     $log->id,
-                    $log->device_id,
+                    $log->device->device_id ?? $log->device_id,
                     $log->db_spl,
                     $log->rms,
                     $log->peak_frequency,
@@ -92,8 +96,8 @@ class ArchiveDailyLogs extends Command
         // 4. Clear Database
         // Use truncate for speed if it's the whole table, or delete()
         // Here we use query builder delete to be safe or Model truncate
-        FftLog::truncate();
+        $deleted = FftLog::where('id', '<=', $maxId)->delete();
 
-        $this->info('Database table fft_logs has been truncated.');
+        $this->info("Deleted {$deleted} archived rows from fft_logs.");
     }
 }

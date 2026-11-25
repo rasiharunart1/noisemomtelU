@@ -4,9 +4,7 @@ namespace App\Console\Commands;
 
 use Illuminate\Console\Command;
 use App\Models\RecordingSchedule;
-use App\Models\Setting;
-use PhpMqtt\Client\MqttClient;
-use PhpMqtt\Client\ConnectionSettings;
+use App\Services\DeviceCommandService;
 use Illuminate\Support\Carbon;
 
 class TriggerScheduledRecordings extends Command
@@ -67,42 +65,21 @@ class TriggerScheduledRecordings extends Command
 
     private function triggerRecording(RecordingSchedule $schedule)
     {
-        if (!$schedule->device || $schedule->device->status !== 'online') {
+        if (!$schedule->device || $schedule->device->status === 'offline') {
             $this->warn("Device {$schedule->device_id} is offline or missing. Skipping.");
+            return;
+        }
+        if ($schedule->device->status === 'recording') {
+            // The firmware ignores start_recording while recording; retry next minute
+            $this->warn("Device {$schedule->device->device_id} is still recording. Skipping this run.");
             return;
         }
 
         try {
-            // MQTT Config
-            $host = Setting::get('mqtt_host', env('MQTT_HOST'));
-            $port = (int) Setting::get('mqtt_port', env('MQTT_PORT', 8883));
-            $username = Setting::get('mqtt_username', env('MQTT_USERNAME'));
-            $password = Setting::get('mqtt_password', env('MQTT_PASSWORD'));
-
-            $clientId = 'laravel_scheduler_' . uniqid();
-            $mqtt = new MqttClient($host, $port, $clientId);
-
-            $connectionSettings = (new ConnectionSettings)
-                ->setUsername($username)
-                ->setPassword($password)
-                ->setUseTls(true)
-                ->setTlsSelfSignedAllowed(true)
-                ->setTlsVerifyPeer(false)
-                ->setTlsVerifyPeerName(false);
-
-            $mqtt->connect($connectionSettings, true);
-
-            // Command Payload
-            $topic = "audio/{$schedule->device->device_id}/command";
-            $payload = json_encode([
-                'action' => 'start_recording',
+            app(DeviceCommandService::class)->send($schedule->device->device_id, 'start_recording', [
                 'duration' => $schedule->duration_seconds,
                 'schedule_id' => $schedule->id,
-                'timestamp' => now()->timestamp
             ]);
-
-            $mqtt->publish($topic, $payload, 0);
-            $mqtt->disconnect();
 
             // Update Schedule
             $schedule->update([

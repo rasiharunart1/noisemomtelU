@@ -151,6 +151,29 @@
 
                 <hr class="my-8 border-white/10">
 
+                <h3 class="text-xl font-bold text-gray-900 dark:text-white mb-6">Audio Recording Storage</h3>
+
+                <div class="glass-card p-6 rounded-xl bg-red-500/5 border border-red-500/10 mb-6">
+                    <div class="flex items-center justify-between">
+                        <div class="pr-4">
+                            <h4 class="font-bold text-gray-900 dark:text-white">Delete from SD card after upload</h4>
+                            <p class="text-xs text-gray-500 dark:text-gray-400">
+                                Off (recommended): every recording is kept on the device's micro SD card <em>and</em> stored on this server.
+                                The device deletes its oldest uploaded recordings by itself when the SD card is almost full.
+                                On: the SD copy is deleted as soon as the server has stored the file.
+                            </p>
+                        </div>
+                        <label class="relative inline-flex items-center cursor-pointer shrink-0">
+                            <input type="hidden" name="recording_delete_after_upload" value="0">
+                            <input type="checkbox" name="recording_delete_after_upload" value="1" class="sr-only peer"
+                                {{ $settings['recording_delete_after_upload'] ? 'checked' : '' }}>
+                            <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-red-300 dark:peer-focus:ring-red-800 rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-red-500"></div>
+                        </label>
+                    </div>
+                </div>
+
+                <hr class="my-8 border-white/10">
+
                 <h3 class="text-xl font-bold text-gray-900 dark:text-white mb-6">Automatic Log Archival</h3>
                 
                 <div class="glass-card p-6 rounded-xl bg-orange-500/5 border border-orange-500/10 mb-6">

@@ -77,7 +77,7 @@
                                     {{ $device->mqtt_topic }}
                                 </td>
                                 <td class="px-6 py-4">
-                                    <span class="px-3 py-1 rounded-full text-xs font-semibold {{ $device->status === 'online' ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-400' : 'bg-gray-500/20 text-gray-600 dark:text-gray-400' }}">
+                                    <span class="px-3 py-1 rounded-full text-xs font-semibold {{ $device->isAlive() ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-400' : 'bg-gray-500/20 text-gray-600 dark:text-gray-400' }}">
                                         {{ ucfirst($device->status) }}
                                     </span>
                                 </td>
@@ -172,7 +172,7 @@
                 L.tileLayer(tileUrl, { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
 
                 function createCustomIcon(status) {
-                    const color = status === 'online' ? '#fbbf24' : '#ef4444';
+                    const color = (status === 'online' || status === 'recording') ? '#fbbf24' : '#ef4444';
                     return L.divIcon({
                         html: `<div class="custom-marker"><div class="marker-pulse" style="background-color: ${color}"></div><div class="marker-pin" style="background-color: ${color}"></div></div>`,
                         className: '', iconSize: [32, 32], iconAnchor: [16, 16]
@@ -190,7 +190,7 @@
                         }).bindPopup(`
                             <div class="p-1 min-w-[150px]">
                                 <div class="flex items-center space-x-2 mb-2">
-                                    <div class="w-2 h-2 rounded-full ${device.status === 'online' ? 'bg-yellow-400' : 'bg-red-500'}"></div>
+                                    <div class="w-2 h-2 rounded-full ${(device.status === 'online' || device.status === 'recording') ? 'bg-yellow-400' : 'bg-red-500'}"></div>
                                     <h3 class="font-bold text-gray-900 dark:text-white text-sm">${device.name ?? 'Device'}</h3>
                                 </div>
                                 <p class="text-[10px] text-gray-500 font-mono mb-3">${device.device_id}</p>

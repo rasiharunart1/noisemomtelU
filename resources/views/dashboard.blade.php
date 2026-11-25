@@ -23,7 +23,7 @@
             <div class="flex items-center justify-between">
                 <div>
                     <p class="text-sm text-gray-600 dark:text-gray-400">Online</p>
-                    <p class="text-3xl font-bold text-emerald-600 dark:text-emerald-400">{{ $devices->where('status', 'online')->count() }}</p>
+                    <p class="text-3xl font-bold text-emerald-600 dark:text-emerald-400">{{ $devices->filter(fn ($d) => $d->isAlive())->count() }}</p>
                 </div>
                 <div class="p-3 bg-emerald-500/20 rounded-lg">
                     <svg class="w-8 h-8 text-emerald-500" fill="currentColor" viewBox="0 0 20 20">
@@ -37,7 +37,7 @@
             <div class="flex items-center justify-between">
                 <div>
                     <p class="text-sm text-gray-600 dark:text-gray-400">Offline</p>
-                    <p class="text-3xl font-bold text-gray-600 dark:text-gray-400">{{ $devices->where('status', 'offline')->count() }}</p>
+                    <p class="text-3xl font-bold text-gray-600 dark:text-gray-400">{{ $devices->reject(fn ($d) => $d->isAlive())->count() }}</p>
                 </div>
                 <div class="p-3 bg-gray-500/20 rounded-lg">
                     <svg class="w-8 h-8 text-gray-500" fill="currentColor" viewBox="0 0 20 20">
@@ -128,8 +128,8 @@
                         <p class="text-sm text-gray-600 dark:text-gray-400">{{ $device->device_id }}</p>
                     </div>
                     <div class="flex items-center space-x-2">
-                        <div class="{{ $device->status === 'online' ? 'status-online' : 'status-offline' }}"></div>
-                        <span data-status-text class="text-sm font-medium {{ $device->status === 'online' ? 'text-emerald-600 dark:text-emerald-400' : 'text-gray-600 dark:text-gray-400' }}">
+                        <div class="{{ $device->isAlive() ? 'status-online' : 'status-offline' }}"></div>
+                        <span data-status-text class="text-sm font-medium {{ $device->isAlive() ? 'text-emerald-600 dark:text-emerald-400' : 'text-gray-600 dark:text-gray-400' }}">
                             {{ ucfirst($device->status) }}
                         </span>
                     </div>
@@ -230,6 +230,17 @@
                     </div>
                 </div>
 
+                <!-- Device health summary (audio/<id>/health) -->
+                @php
+                    $h = $device->health ?? [];
+                    $sd = $h['sd'] ?? [];
+                @endphp
+                <div class="mt-4 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-gray-500 dark:text-gray-400" data-health-line>
+                    <span>SD: <b class="text-gray-800 dark:text-gray-200" data-health="sd">{{ isset($sd['ok']) ? ($sd['ok'] ? (isset($sd['free_mb']) ? number_format($sd['free_mb'] / 1024, 1) . ' GB free' : 'OK') : 'error') : '-' }}</b></span>
+                    <span>Pending upload: <b class="text-gray-800 dark:text-gray-200" data-health="pending">{{ $sd['pending_files'] ?? '-' }}</b></span>
+                    <span>WiFi: <b class="text-gray-800 dark:text-gray-200" data-health="rssi">{{ isset($h['wifi']['rssi']) ? $h['wifi']['rssi'] . ' dBm' : '-' }}</b></span>
+                </div>
+
                 <!-- Last Update -->
                 <div class="mt-4 pt-4 border-t border-white/10 flex items-center justify-between">
                     <p class="text-xs text-gray-500 dark:text-gray-400">
@@ -246,7 +257,7 @@
                                 title="Start Recording"
                                 data-device-id="{{ $device->device_id }}"
                                 data-device-uuid="{{ $device->id }}"
-                                {{ $device->status !== 'online' ? 'disabled' : '' }}>
+                                {{ !$device->isAlive() || $device->status === 'recording' ? 'disabled' : '' }}>
                             <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -312,7 +323,7 @@
         
         // Function to get marker color based on status and threshold
         function getMarkerColor(device) {
-            if (device.status !== 'online') {
+            if (device.status !== 'online' && device.status !== 'recording') {
                 return '#6b7280'; // Gray - offline
             }
             if (device.exceeding_threshold) {
@@ -430,8 +441,8 @@
         // MQTT WebSocket Connection
         const mqttHost = '{{ $mqttHost }}';
         const mqttTopic = '{{ $mqttTopic }}';
-        const mqttUser = "{{ config('mqtt.username', env('MQTT_USERNAME')) }}";
-        const mqttPass = "{{ config('mqtt.password', env('MQTT_PASSWORD')) }}";
+        const mqttUser = "{{ config('mqtt.username') }}";
+        const mqttPass = "{{ config('mqtt.password') }}";
         
         // Use standard WSS port 8884 for HiveMQ Cloud, or 8083/9001 for others
         // Better to verify connection in setting test first
@@ -458,6 +469,9 @@
             const statusTopic = mqttTopic.replace('/data', '/status');
             client.subscribe(statusTopic, { qos: 1 });
             console.log('Subscribed to:', statusTopic);
+
+            // Device health (retained, every 60 s)
+            client.subscribe(mqttTopic.replace('/data', '/health'), { qos: 0 });
         });
 
         client.on('error', (err) => {
@@ -469,6 +483,10 @@
         client.on('message', (topic, message) => {
             try {
                 const data = JSON.parse(message.toString());
+                if (topic.endsWith('/health')) {
+                    updateHealthLine(data);
+                    return;
+                }
                 updateDeviceCard(data);
                 
                 // Update map marker if exists
@@ -487,9 +505,23 @@
             }
         });
 
+        function updateHealthLine(h) {
+            const card = document.querySelector(`[data-device-id="${h.device_id}"]`);
+            if (!card) return;
+            const set = (key, text) => {
+                const el = card.querySelector(`[data-health="${key}"]`);
+                if (el) el.textContent = text;
+            };
+            const sd = h.sd || {};
+            if (sd.ok === false) set('sd', 'error');
+            else if (sd.free_mb !== undefined) set('sd', (sd.free_mb / 1024).toFixed(1) + ' GB free');
+            if (sd.pending_files !== undefined) set('pending', sd.pending_files);
+            if (h.wifi && h.wifi.rssi !== undefined) set('rssi', h.wifi.rssi + ' dBm');
+        }
+
         // Function to update statistics counters
         function updateStatistics() {
-            const allCards = document.querySelectorAll('[data-device-id]');
+            const allCards = document.querySelectorAll('.glass-card[data-device-id]');
             let onlineCount = 0;
             let offlineCount = 0;
             let exceedingCount = 0;
@@ -498,7 +530,7 @@
                 const statusTextCallback = card.querySelector('[data-status-text]');
                 if (statusTextCallback) {
                     const status = statusTextCallback.textContent.toLowerCase().trim();
-                    if (status === 'online') {
+                    if (status === 'online' || status === 'recording') {
                         onlineCount++;
                     } else {
                         offlineCount++;

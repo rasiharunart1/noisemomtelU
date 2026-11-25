@@ -6,6 +6,7 @@ use App\Models\Device;
 use App\Models\FftLog;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
+use ZipArchive;
 
 class FftLogController extends Controller
 {
@@ -14,30 +15,7 @@ class FftLogController extends Controller
      */
     public function index(Request $request)
     {
-        $query = FftLog::with('device');
-
-        // Filter by device
-        if ($request->filled('device_id')) {
-            $query->where('device_id', $request->device_id);
-        }
-
-        // Filter by date range
-        if ($request->filled('start_date')) {
-            $query->where('created_at', '>=', $request->start_date);
-        }
-
-        if ($request->filled('end_date')) {
-            $query->where('created_at', '<=', $request->end_date . ' 23:59:59');
-        }
-
-        // Filter by peak frequency range
-        if ($request->filled('min_frequency')) {
-            $query->where('peak_frequency', '>=', $request->min_frequency);
-        }
-
-        if ($request->filled('max_frequency')) {
-            $query->where('peak_frequency', '<=', $request->max_frequency);
-        }
+        $query = $this->filteredQuery($request);
 
         $logs = $query->orderBy('created_at', 'desc')
             ->paginate(50);
@@ -68,22 +46,9 @@ class FftLogController extends Controller
      */
     public function export(Request $request)
     {
-        $query = FftLog::with('device');
+        $query = $this->filteredQuery($request);
 
-        // Apply same filters as index
-        if ($request->filled('device_id')) {
-            $query->where('device_id', $request->device_id);
-        }
-
-        if ($request->filled('start_date')) {
-            $query->where('created_at', '>=', $request->start_date);
-        }
-
-        if ($request->filled('end_date')) {
-            $query->where('created_at', '<=', $request->end_date . ' 23:59:59');
-        }
-
-        $logs = $query->orderBy('created_at', 'desc')->get();
+        $logs = $query->orderBy('created_at', 'desc')->lazy(1000);
 
         $filename = 'fft_logs_' . now()->format('Y-m-d_His') . '.csv';
         
@@ -95,41 +60,30 @@ class FftLogController extends Controller
         $callback = function() use ($logs) {
             $file = fopen('php://output', 'w');
             
-            // CSV Header
+            // CSV Header (columns that exist in fft_logs)
             fputcsv($file, [
                 'Timestamp',
                 'Device ID',
+                'dB SPL',
                 'RMS',
-                'Peak Amplitude',
-                'Noise Floor',
-                'Gain',
                 'Peak Frequency',
-                'Peak Magnitude',
                 'Total Energy',
                 'Band Low',
                 'Band Mid',
                 'Band High',
-                'Spectral Centroid',
-                'ZCR'
             ]);
 
-            // CSV Data
             foreach ($logs as $log) {
                 fputcsv($file, [
                     $log->created_at,
                     $log->device->device_id ?? 'Unknown',
+                    $log->db_spl,
                     $log->rms,
-                    $log->peak_amplitude,
-                    $log->noise_floor,
-                    $log->gain,
                     $log->peak_frequency,
-                    $log->peak_magnitude,
                     $log->total_energy,
                     $log->band_low,
                     $log->band_mid,
                     $log->band_high,
-                    $log->spectral_centroid,
-                    $log->zcr,
                 ]);
             }
 
@@ -156,7 +110,7 @@ class FftLogController extends Controller
             'rms' => $logs->pluck('rms'),
             'peak_frequency' => $logs->pluck('peak_frequency'),
             'total_energy' => $logs->pluck('total_energy'),
-            'spectral_centroid' => $logs->pluck('spectral_centroid'),
+            'db_spl' => $logs->pluck('db_spl'),
         ]);
     }
 
@@ -176,6 +130,7 @@ class FftLogController extends Controller
      */
     public function downloadArchive($filename)
     {
+        $filename = basename($filename);
         if (!Storage::exists('exports/logs/' . $filename)) {
             return redirect()->back()->with('error', 'Archive file not found.');
         }
@@ -209,6 +164,7 @@ class FftLogController extends Controller
         }
 
         foreach ($files as $filename) {
+            $filename = basename((string) $filename); // no path traversal
             $filePath = 'exports/logs/' . $filename;
             if (Storage::exists($filePath)) {
                 $zip->addFile(Storage::path($filePath), $filename);
@@ -218,5 +174,31 @@ class FftLogController extends Controller
         $zip->close();
 
         return response()->download($zipPath, $zipFilename)->deleteFileAfterSend(true);
+    }
+
+    /**
+     * Filters shared by the log table and the CSV export.
+     */
+    private function filteredQuery(Request $request)
+    {
+        $query = FftLog::with('device');
+
+        if ($request->filled('device_id')) {
+            $query->where('device_id', $request->device_id);
+        }
+        if ($request->filled('start_date')) {
+            $query->where('created_at', '>=', $request->start_date);
+        }
+        if ($request->filled('end_date')) {
+            $query->where('created_at', '<=', $request->end_date . ' 23:59:59');
+        }
+        if ($request->filled('min_frequency')) {
+            $query->where('peak_frequency', '>=', $request->min_frequency);
+        }
+        if ($request->filled('max_frequency')) {
+            $query->where('peak_frequency', '<=', $request->max_frequency);
+        }
+
+        return $query;
     }
 }

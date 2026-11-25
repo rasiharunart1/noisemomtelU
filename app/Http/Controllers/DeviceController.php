@@ -9,8 +9,7 @@ use Illuminate\Http\Request;
 use App\Models\Setting;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Storage;
-use PhpMqtt\Client\MqttClient;
-use PhpMqtt\Client\ConnectionSettings;
+use App\Services\DeviceCommandService;
 use ZipArchive;
 
 class DeviceController extends Controller
@@ -241,7 +240,6 @@ class DeviceController extends Controller
         }
 
         $recording->update(['status' => 'requested']);
-        $device->update(['status' => 'online']);
 
         return $this->sendCommand($device, 'upload_file', [
             'filename' => $recording->sd_filename,
@@ -275,6 +273,32 @@ class DeviceController extends Controller
         ]);
     }
 
+    /**
+     * SD card / maintenance commands for the device:
+     *  upload_all      upload every recording not yet on the server (force: re-upload all)
+     *  list_files      device reports its SD files; the listener syncs the table
+     *  get_status      device publishes a fresh health report
+     *  delete_uploaded delete recordings that are already on the server from the SD card
+     *  set_auto_upload enable/disable automatic upload after each recording
+     *  restart         reboot the device (an active recording is closed first)
+     */
+    public function command(Request $request, Device $device)
+    {
+        $validated = $request->validate([
+            'action' => 'required|string|in:upload_all,list_files,get_status,delete_uploaded,set_auto_upload,restart',
+            'force' => 'sometimes|boolean',
+            'enabled' => 'sometimes|boolean',
+        ]);
+
+        $data = match ($validated['action']) {
+            'upload_all' => ['force' => (bool) ($validated['force'] ?? false)],
+            'set_auto_upload' => ['enabled' => (bool) ($validated['enabled'] ?? true)],
+            default => [],
+        };
+
+        return $this->sendCommand($device, $validated['action'], $data);
+    }
+
     public function resetWifi(Request $request, Device $device)
     {
         return $this->sendCommand($device, 'reset_wifi');
@@ -300,42 +324,12 @@ class DeviceController extends Controller
     private function sendCommand(Device $device, string $action, array $data = [])
     {
         try {
-            // Get MQTT configuration
-            $host = Setting::get('mqtt_host', env('MQTT_HOST'));
-            $port = (int) Setting::get('mqtt_port', env('MQTT_PORT', 8883));
-            $username = Setting::get('mqtt_username', env('MQTT_USERNAME'));
-            $password = Setting::get('mqtt_password', env('MQTT_PASSWORD'));
-            
-            // Command topic: audio/{device_id}/command
-            $topic = "audio/{$device->device_id}/command";
-            
-            $clientId = 'laravel_web_' . uniqid();
-            $mqtt = new MqttClient($host, $port, $clientId);
-
-            $connectionSettings = (new ConnectionSettings)
-                ->setUsername($username)
-                ->setPassword($password)
-                ->setUseTls(true)
-                ->setTlsSelfSignedAllowed(true)
-                ->setTlsVerifyPeer(false)
-                ->setTlsVerifyPeerName(false);
-
-            $mqtt->connect($connectionSettings, true);
-
-            $payload = json_encode(array_merge([
-                'action' => $action,
-                'timestamp' => now()->timestamp,
-                'device_id' => $device->device_id
-            ], $data));
-
-            $mqtt->publish($topic, $payload, 0);
-            $mqtt->disconnect();
+            app(DeviceCommandService::class)->send($device->device_id, $action, $data);
 
             return response()->json([
-                'success' => true, 
+                'success' => true,
                 'message' => "Command {$action} sent to {$device->device_id}"
             ]);
-
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
@@ -349,11 +343,12 @@ class DeviceController extends Controller
      */
     public function downloadRecording(AudioRecording $recording)
     {
-        $filePath = storage_path('app/public/' . $recording->path);
-        
-        if (!file_exists($filePath)) {
-            return redirect()->back()->with('error', 'Audio file not found');
+        // Recordings that are only on the SD card have an empty path
+        $disk = Storage::disk('public');
+        if (empty($recording->path) || !$disk->exists($recording->path)) {
+            return redirect()->back()->with('error', 'Audio file is not on the server yet. Use "Fetch from Device" first.');
         }
+        $filePath = $disk->path($recording->path);
 
         return response()->download($filePath, $recording->filename);
     }
@@ -386,14 +381,24 @@ class DeviceController extends Controller
         $zip = new ZipArchive;
         
         if ($zip->open($zipFilePath, ZipArchive::CREATE | ZipArchive::OVERWRITE) === TRUE) {
+            $added = 0;
             foreach ($recordings as $recording) {
+                if (empty($recording->path)) {
+                    continue; // still only on the SD card
+                }
                 $filePath = storage_path('app/public/' . $recording->path);
-                
-                if (file_exists($filePath)) {
+
+                if (is_file($filePath)) {
                     $zip->addFile($filePath, $recording->filename);
+                    $added++;
                 }
             }
             $zip->close();
+
+            if ($added === 0) {
+                @unlink($zipFilePath);
+                return redirect()->back()->with('error', 'None of the selected recordings are stored on the server yet');
+            }
 
             return response()->download($zipFilePath, $zipFileName)->deleteFileAfterSend(true);
         }

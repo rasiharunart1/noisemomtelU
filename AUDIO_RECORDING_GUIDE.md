@@ -2,25 +2,31 @@
 
 Great job berhasil mengakses SD Card! Untuk merekam audio, kita perlu menambahkan perangkat keras mikrofon dan sedikit logika perangkat lunak untuk menyimpan data suara dalam format yang bisa diputar (WAV).
 
-## 0. Arsitektur Recording On-Demand (BARU)
+## 0. Arsitektur Recording: SD Card + Server (firmware v3.1)
 
-Rekaman sekarang berjalan **sepenuhnya di perangkat** — tidak ada transaksi file selama perekaman:
+Setiap rekaman disimpan **dua kali**: di micro SD card ESP32 dan di server Laravel.
 
 ```mermaid
 flowchart LR
-    A[Web: set durasi\nmis. 30 menit] -->|MQTT start_recording\nduration=1800| B[ESP32 rekam ke SD\nauto-stop + progress tiap 5s]
-    B -->|MQTT recording_status\ncompleted + filename| C[Laravel buat record\nstatus on_device]
-    C -->|User klik\nFetch from Device| D[Laravel set requested\n+ MQTT upload_file]
-    D -->|ESP32 upload multipart| E[AudioUploadController\nupsert + completed]
-    E -->|MQTT delete_file| F[SD card dibersihkan]
-    E --> G[Web: audio player\n+ tombol Download]
+    A["Web / jadwal:<br>start_recording duration"] -->|MQTT| B["audioTask ESP32<br>I2S -> WAV di /rec/<br>header di-update tiap 10s"]
+    B -->|"MQTT recording_status<br>completed + filename"| C["Laravel: record<br>status on_device"]
+    B --> D["Auto upload<br>HTTP multipart + sd_filename"]
+    D --> E["AudioUploadController<br>status completed<br>storage/app/public/recordings/DEVICE_ID/"]
+    D --> F["SD: file dipindah ke /rec/up/<br>TETAP disimpan"]
+    F -->|SD hampir penuh| G["Hapus file /rec/up/ paling lama"]
 ```
 
 Poin penting:
-- **Durasi diatur dari web** (menit, 0 = rekam sampai dihentikan manual). Dikirim per-sesi via MQTT `start_recording` payload `duration` (detik). Maksimum 14400 detik (4 jam); 30 menit ≈ 57,6 MB WAV (16000 Hz × 2 byte).
-- **Tanpa putus-putus**: ESP32 menulis langsung ke SD card dengan DMA buffer besar; Laravel hanya menerima progress tiap 5 detik via topik `audio/{device_id}/recording_status`.
-- **Upload on-demand**: file hanya dikirim ke Laravel saat user klik "Fetch from Device" di halaman device. Setelah tersimpan, Laravel otomatis mengirim `delete_file` agar SD card tidak penuh.
-- **Status rekaman di DB**: `on_device` (file di SD), `requested` (upload diminta), `uploading`, `completed` (tersimpan di server), `upload_failed`.
+- **Rekam tanpa putus**: I2S + tulis SD berjalan di FreeRTOS task terpisah (`audioTask`). Reconnect WiFi/MQTT atau upload tidak mengganggu rekaman, dan perangkat bisa merekam file baru sambil meng-upload file sebelumnya.
+- **Nama file unik berbasis waktu NTP (WIB)**: `/rec/<DEVICE_ID>_<YYYYMMDD>_<HHMMSS>.wav`. Jika NTP belum sinkron, dipakai boot counter (`..._boot00012_...`), jadi file lama tidak pernah tertimpa setelah reboot.
+- **Tahan listrik mati**: header WAV di-update tiap 10 detik, sehingga file tetap bisa diputar.
+- **Auto upload + retry**: setelah rekaman selesai, file langsung di-upload. Jika server mati, dicoba ulang dengan backoff 1 menit hingga 30 menit. Saat boot, file yang belum ter-upload juga dikirim.
+- **Folder di SD card**: `/rec/` berisi rekaman yang **belum** ter-upload, `/rec/up/` berisi rekaman yang **sudah** ada di server (salinan cadangan). File lama firmware v2 di root SD otomatis dipindah ke `/rec/`.
+- **SD card tidak penuh**: sebelum merekam, firmware memastikan ada ruang. Jika kurang, rekaman lama yang **sudah ter-upload** dihapus lebih dulu. Rekaman yang belum ter-upload tidak pernah dihapus otomatis; jika tetap penuh, perangkat mengirim status `sd_full`.
+- **Opsi hapus dari SD setelah upload**: Settings → *Audio Recording Storage*. Default **mati** (file disimpan di SD dan server).
+- **Fetch from Device** tetap tersedia untuk meminta upload manual (misalnya setelah `upload_failed`).
+- **Status rekaman di DB**: `on_device` (baru di SD), `requested`, `uploading`, `completed` (ada di server), `upload_failed`.
+- Durasi maksimum 4 jam per file (termasuk mode manual), sekitar 460 MB.
 
 ## 1. Perangkat Keras (Hardware)
 
@@ -83,13 +89,29 @@ Lihat `struct WAVHeader` di dalam file `esp32_firmware_complete.ino`.
 6. Pantau progress bar realtime di halaman device. Saat selesai, rekaman muncul di tabel dengan status **On SD Card**.
 7. Klik **Fetch from Device** untuk meminta upload. Halaman otomatis reload saat upload selesai dan audio player + tombol Download muncul.
 
-Perintah MQTT yang didukung firmware:
+Perintah MQTT yang didukung firmware (`audio/<DEVICE_ID>/command`). Semua tersedia sebagai tombol di halaman device (kartu **Device Health & SD Card**):
 | Action | Payload | Keterangan |
 | :--- | :--- | :--- |
-| `start_recording` | `{"duration": 1800}` | Mulai rekam; `duration` dalam detik, 0 = sampai dihentikan |
+| `start_recording` | `{"duration": 1800}` | Mulai rekam; `duration` dalam detik, 0 = sampai dihentikan (maks 4 jam) |
 | `stop_recording` | — | Hentikan rekaman manual |
-| `upload_file` | `{"filename": "/rec_XXX.wav"}` | Upload file dari SD ke server |
-| `delete_file` | `{"filename": "/rec_XXX.wav"}` | Hapus file dari SD card |
+| `upload_file` | `{"filename": "/rec/XXX.wav"}` | Upload satu file dari SD ke server (dicari juga di `/rec/up/`) |
+| `upload_all` | `{"force": false}` | Upload semua file yang belum ter-upload sekarang juga. `force: true` = upload ulang semua file di SD |
+| `list_files` | — | Kirim daftar file SD ke `audio/<ID>/files`; Laravel menyinkronkan kolom *Storage* (SD ✓/✗) dan mendaftarkan file yang belum dikenal |
+| `get_status` | — | Kirim laporan health sekarang |
+| `delete_uploaded` | — | Hapus semua file di `/rec/up/` (sudah aman di server) untuk mengosongkan SD |
+| `delete_file` | `{"filename": "/rec/XXX.wav"}` | Hapus satu file dari SD card |
+| `set_auto_upload` | `{"enabled": false}` | Matikan/nyalakan auto upload (disimpan di NVS) |
+| `restart` | — | Restart perangkat (rekaman aktif ditutup dengan benar dulu) |
+
+Topik yang dikirim perangkat:
+| Topik | Isi |
+| :--- | :--- |
+| `audio/<ID>/data` | dB SPL + FFT tiap 1 detik (`status: recording` saat merekam, Last Will `offline`) |
+| `audio/<ID>/recording_status` | `recording`, `completed`, `uploading` (+`progress`), `upload_completed`, `upload_failed` (+`error`), `file_deleted`, `upload_all_started`, `upload_all_done`, `sd_cleaned`, `sd_full`, `sd_error`, `restarting`, `idle` |
+| `audio/<ID>/health` | Tiap 60 detik, *retained*: versi firmware, uptime, alasan reset, RAM, sinyal WiFi, sinkron NTP, kapasitas & sisa SD, jumlah file belum/sudah ter-upload, waktu tulis SD terlama, jumlah tulis lambat (>300 ms, risiko audio terputus), error tulis, status upload & error terakhir, gain |
+| `audio/<ID>/files` | Jawaban `list_files`, 25 file per pesan |
+
+Gain dari slider web disimpan di NVS perangkat, dan Laravel mengirim ulang gain dari database setiap kali perangkat kembali online.
 
 Catatan server: pastikan `php.ini` memiliki `upload_max_filesize` dan `post_max_size` yang cukup (sudah diset 512M/520M di XAMPP). Jika memakai Apache, restart setelah mengubah `php.ini`.
 

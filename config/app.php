@@ -67,6 +67,10 @@ return [
 
     'timezone' => 'UTC',
 
+    // Timezone users type and read times in (schedule form/table).
+    // Stored timestamps stay in UTC ('timezone' above).
+    'display_timezone' => env('APP_TIMEZONE', 'Asia/Jakarta'),
+
     /*
     |--------------------------------------------------------------------------
     | Application Locale Configuration

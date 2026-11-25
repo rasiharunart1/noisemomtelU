@@ -22,12 +22,27 @@ class Device extends Model
         'longitude',
         'gain',
         'max_db_spl_threshold',
+        'health',
+        'health_updated_at',
     ];
+
+    // Never leak device tokens into JSON (e.g. @json($devices) in views)
+    protected $hidden = ['token'];
 
     protected $casts = [
         'last_seen' => 'datetime',
         'token' => 'encrypted', // Encrypt token in database for security
+        'health' => 'array',
+        'health_updated_at' => 'datetime',
     ];
+
+    /**
+     * A device that is recording is also online.
+     */
+    public function isAlive(): bool
+    {
+        return in_array($this->status, ['online', 'recording'], true);
+    }
 
     protected static function boot()
     {
@@ -57,7 +72,7 @@ class Device extends Model
 
     public function scopeOnline($query)
     {
-        return $query->where('status', 'online');
+        return $query->whereIn('status', ['online', 'recording']);
     }
 
     public function scopeOffline($query)

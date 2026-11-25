@@ -1,56 +1,85 @@
 /**
- * Noisemon ESP32 Firmware - Complete Recording System + Real-time FFT
+ * Noisemon ESP32 Firmware v3.1 - SD Card + Server Recording + Real-time FFT
  *
  * Hardware: ESP32 + INMP441 Microphone + SD Card Module
- * Features:
- * - Remote recording control via MQTT (Non-blocking)
- * - WAV file generation with proper headers
- * - Automatic upload to Laravel server
- * - Real-time FFT & dB SPL analysis over MQTT
  *
- * Optimized: 16-bit / 16000Hz Mono
+ * Arsitektur:
+ *  - audioTask (core 1, prioritas tinggi): baca I2S terus-menerus, terapkan
+ *    gain, tulis WAV ke SD card, dan siapkan frame untuk FFT. Tidak pernah
+ *    menyentuh WiFi/MQTT, jadi rekaman tidak putus walau jaringan lambat.
+ *  - loop(): WiFi/MQTT, publish FFT tiap 1 detik, progress rekaman, health,
+ *    dan upload file ke Laravel (boleh sambil merekam file berikutnya).
+ *
+ * Penyimpanan di SD card:
+ *  - /rec/<DEVICE_ID>_<YYYYMMDD>_<HHMMSS>.wav  -> belum ter-upload ke server
+ *  - /rec/up/<nama yang sama>.wav               -> sudah ter-upload (TETAP
+ *    disimpan sebagai salinan kedua)
+ *  - Setelah rekaman selesai, file otomatis di-upload. Jika gagal, dicoba
+ *    ulang dengan backoff 1 menit s/d 30 menit.
+ *  - Saat SD hampir penuh, file di /rec/up paling lama dihapus otomatis.
+ *    File yang belum ter-upload tidak pernah dihapus otomatis.
+ *  - Header WAV diperbarui tiap 10 detik (aman terhadap listrik mati).
+ *
+ * MQTT topics (<ID> = DEVICE_ID):
+ *  - audio/<ID>/data              FFT + dB SPL tiap 1 detik (+ Last Will offline)
+ *  - audio/<ID>/recording_status  progress rekaman/upload
+ *  - audio/<ID>/health            kondisi perangkat tiap 60 detik (retained)
+ *  - audio/<ID>/files             daftar file di SD (jawaban list_files)
+ *  - audio/<ID>/command           perintah dari Laravel (lihat mqttCallback)
+ *  - audio/<ID>/control           set_gain dari slider web
+ *
+ * Format audio: 16-bit PCM / 16000 Hz / Mono (32 KB/detik, ~115 MB/jam)
+ *
+ * Library: ArduinoJson v7, PubSubClient, WiFiManager (tzapu), arduinoFFT v2
+ * Board  : ESP32 Arduino core 2.x atau 3.x
  */
 
+#include <Arduino.h>
 #include <ArduinoJson.h>
 #include <FS.h>
-#include <HTTPClient.h>
+#include <Preferences.h>
 #include <PubSubClient.h>
 #include <SD.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
-// ... (previous includes)
-#include "soc/rtc_cntl_reg.h" // BROWN-OUT FIX
-#include "soc/soc.h"          // BROWN-OUT FIX
-#include <Preferences.h>
 #include <WiFiManager.h> // https://github.com/tzapu/WiFiManager
 #include <arduinoFFT.h>
 #include <driver/i2s.h>
+#include <esp_system.h>
+#include <time.h>
 
-// --- Configuration ---
-const char *ssid = "harun";
-const char *password = "harun3211";
+#include "soc/rtc_cntl_reg.h" // BROWN-OUT FIX
+#include "soc/soc.h"          // BROWN-OUT FIX
 
-// API (Laravel Server)
-const char *upload_url = "http://192.168.97.91:8000/api/upload-audio";
+#define FW_VERSION "3.1.0"
 
-// MQTT
+// ============================================================================
+// Configuration
+// ============================================================================
+
+// MQTT broker
 const char *mqtt_server = "9b7d755e8d024ad08d0c39177e53c908.s1.eu.hivemq.cloud";
 const int mqtt_port = 8883;
 const char *mqtt_user = "kalicupak";
 const char *mqtt_pass = "Kalicupak321";
 
-// Server Config (Will be loaded from Preferences)
+// Zona waktu untuk nama file rekaman (WIB = UTC+7)
+const char *TZ_INFO = "WIB-7";
+const char *NTP_SERVER_1 = "pool.ntp.org";
+const char *NTP_SERVER_2 = "time.google.com";
+
+// Server Config (dimuat dari Preferences / WiFiManager)
 char SERVER_IP[64] = "192.168.97.91";
 int SERVER_PORT = 8000;
+const char *UPLOAD_PATH = "/api/upload-audio";
 
-// Device Info (Will be loaded from Preferences)
+// Device Info (dimuat dari Preferences / WiFiManager)
 char DEVICE_ID[32] = "ESP32-NOISEMON";
 char DEVICE_TOKEN[64] = "DEFAULT_TOKEN";
 
-// WiFiManager & Preferences
-WiFiManager wm;
-Preferences preferences;
-bool shouldSaveConfig = false;
+// Upload otomatis ke server setelah rekaman selesai (disimpan di NVS)
+bool autoUpload = true;
+uint32_t bootCount = 0;
 
 // I2S & SD Pins
 #define I2S_WS 25
@@ -59,50 +88,161 @@ bool shouldSaveConfig = false;
 #define SD_CS 5
 
 // Audio Constants
-#define SAMPLES 1024        // Must be a power of 2 for FFT
-#define SAMPLING_FREQ 16000 // 16kHz
+#define SAMPLES 1024        // Harus pangkat 2 untuk FFT
+#define SAMPLING_FREQ 16000 // 16 kHz
 #define BITS_PER_SAMPLE 16
 #define NUM_CHANNELS 1
+const uint32_t BYTES_PER_SECOND =
+    SAMPLING_FREQ * NUM_CHANNELS * (BITS_PER_SAMPLE / 8);
 
-// FFT Calibrations
-const float DB_OFFSET = 94.0;
-const float REFERENCE_AMPLITUDE = 32768.0;
+// FFT Calibration
+const float REFERENCE_AMPLITUDE = 32768.0f;
+
+// Storage
+#define REC_DIR "/rec"
+#define UP_DIR "/rec/up"
+#define MAX_PATH_LEN 96
+// Sisakan ruang minimal ini di SD card. Kalau kurang, rekaman lama yang
+// SUDAH ter-upload dihapus dulu.
+const uint64_t SD_RESERVE_BYTES = 200ULL * 1024ULL * 1024ULL;
+// Batas aman satu file (sama dengan batas durasi di Laravel = 4 jam)
+const uint32_t MAX_RECORDING_SECONDS = 4UL * 3600UL;
+// Tulis SD lebih lama dari ini berisiko membuat buffer I2S (~0.5 s) meluap
+const uint32_t SLOW_WRITE_MS = 300;
+
+// Timing
+const unsigned long FFT_INTERVAL_MS = 1000;
+const unsigned long PROGRESS_INTERVAL_MS = 5000;
+const unsigned long HEALTH_INTERVAL_MS = 60000;
+const unsigned long HEADER_SYNC_MS = 10000;
+const unsigned long MQTT_RETRY_MS = 5000;
+const unsigned long WIFI_RETRY_MS = 30000;
+const unsigned long AUTO_UPLOAD_SCAN_MS = 30000;
+const unsigned long UPLOAD_BACKOFF_MIN_MS = 60000;
+const unsigned long UPLOAD_BACKOFF_MAX_MS = 30UL * 60UL * 1000UL;
+const unsigned long HTTP_RESPONSE_TIMEOUT_MS = 60000;
+const unsigned long GAIN_SAVE_DELAY_MS = 3000;
+
+// ============================================================================
+// Types & Globals
+// CATATAN: semua tipe (struct/enum) harus dideklarasikan DI ATAS fungsi
+// pertama, karena Arduino IDE menyisipkan prototype sebelum fungsi pertama.
+// ============================================================================
 
 // MQTT Topics
-char data_topic[50];
-char command_topic[50];
-char status_topic[50];
-char recording_status_topic[50];
+char data_topic[64];
+char command_topic[64];
+char control_topic[64];
+char recording_status_topic[64];
+char health_topic[64];
+char files_topic[64];
+
+WiFiManager wm;
+Preferences preferences;
+bool shouldSaveConfig = false;
 
 WiFiClientSecure espClient;
 PubSubClient mqttClient(espClient);
-ArduinoFFT<float> FFT = ArduinoFFT<float>(); // OPTIMIZATION: Use float
 
-// Buffers
-float vReal[SAMPLES]; // OPTIMIZATION: Use float
-float vImag[SAMPLES]; // OPTIMIZATION: Use float
-int16_t i2sBuffer[SAMPLES];
+ArduinoFFT<float> FFT = ArduinoFFT<float>();
+float vReal[SAMPLES];
+float vImag[SAMPLES];
 
-double micGain = 1.0;
+volatile float micGain = 1.0f;
+bool gainDirty = false;
+unsigned long gainChangedAt = 0;
+bool sdReady = false;
 
-// FFT Throttling
-unsigned long lastFFTTime = 0;
-const unsigned long FFT_INTERVAL = 1000; // 1 second interval
+// --- Shared recording state (ditulis audioTask, dibaca loop via mutex) ---
+portMUX_TYPE stateMux = portMUX_INITIALIZER_UNLOCKED;
+struct RecState {
+  bool active;
+  char filename[MAX_PATH_LEN];
+  uint32_t samples;
+  uint32_t targetSamples;
+  uint32_t plannedSeconds;
+};
+RecState recState = {};
 
-// Recording State
-bool isRecording = false;
-File audioFile;
-uint32_t recordedSamples = 0;
-uint32_t totalSamplesToRecord = 0; // 0 = manual stop only
-uint32_t recordingStartMillis = 0;
-uint32_t plannedDurationSeconds = 0;
-String currentFilename = "";
+// Statistik tulis SD (diisi audioTask, direset saat health dikirim)
+volatile uint32_t maxWriteMs = 0;
+volatile uint32_t slowWrites = 0;
+volatile uint32_t sdWriteErrors = 0;
+
+// --- loop -> audioTask commands ---
+enum RecCmdType : uint8_t { REC_CMD_START, REC_CMD_STOP };
+struct RecCmd {
+  RecCmdType type;
+  uint32_t durationSeconds;
+  char filename[MAX_PATH_LEN];
+};
+QueueHandle_t recCmdQueue;
+
+// --- audioTask -> loop events ---
+enum RecEvtType : uint8_t {
+  REC_EVT_STARTED,
+  REC_EVT_COMPLETED,
+  REC_EVT_OPEN_FAILED
+};
+struct RecEvt {
+  RecEvtType type;
+  char filename[MAX_PATH_LEN];
+  uint32_t samples;
+  uint32_t plannedSeconds;
+  bool writeError;
+};
+QueueHandle_t recEvtQueue;
+
+// --- FFT frame handoff (audioTask mengisi saat diminta loop) ---
+volatile bool fftFrameRequested = false;
+volatile bool fftFrameReady = false;
+float fftFrame[SAMPLES];
+volatile int fftFrameLen = 0;
+
+// --- Deferred jobs dari MQTT callback (diproses di loop) ---
+enum JobType : uint8_t { JOB_UPLOAD, JOB_DELETE };
+struct Job {
+  JobType type;
+  char filename[MAX_PATH_LEN];
+};
+#define MAX_JOBS 8
+Job jobs[MAX_JOBS];
+int jobCount = 0;
+
+// Perintah yang dikerjakan di loop (bukan di dalam callback MQTT)
+bool pendingListFiles = false;
+bool pendingHealth = false;
+bool pendingDeleteUploaded = false;
+bool pendingRestart = false;
+
+// --- Upload state ---
+enum UploadResult { UPLOAD_OK, UPLOAD_RETRY, UPLOAD_REJECTED };
 bool isUploading = false;
+char currentUploadPath[MAX_PATH_LEN] = "";
+unsigned long nextAutoUploadAt = 0;
+unsigned long uploadBackoffMs = UPLOAD_BACKOFF_MIN_MS;
+char lastUploadError[48] = "";
+// upload_all: upload semua file yang belum ter-upload sekarang juga
+bool uploadAllActive = false;
+uint16_t uploadAllOk = 0;
+uint16_t uploadAllFailed = 0;
+// File yang ditolak server (4xx) tidak dicoba otomatis lagi sampai reboot
+#define MAX_REJECTED 16
+char rejectedFiles[MAX_REJECTED][MAX_PATH_LEN];
+int rejectedCount = 0;
 
-// WAV Header Structure
-struct WAVHeader {
+// Ringkasan isi SD card (dihitung saat health dikirim)
+struct SdSummary {
+  uint32_t pendingFiles;
+  uint64_t pendingBytes;
+  uint32_t uploadedFiles;
+  uint64_t uploadedBytes;
+};
+
+// WAV Header (44 byte)
+struct __attribute__((packed)) WAVHeader {
   char riff[4] = {'R', 'I', 'F', 'F'};
-  uint32_t fileSize;
+  uint32_t fileSize = 0;
   char wave[4] = {'W', 'A', 'V', 'E'};
   char fmt[4] = {'f', 'm', 't', ' '};
   uint32_t fmtSize = 16;
@@ -113,13 +253,105 @@ struct WAVHeader {
   uint16_t blockAlign = NUM_CHANNELS * (BITS_PER_SAMPLE / 8);
   uint16_t bitsPerSample = BITS_PER_SAMPLE;
   char data[4] = {'d', 'a', 't', 'a'};
-  uint32_t dataSize;
+  uint32_t dataSize = 0;
 };
+static_assert(sizeof(WAVHeader) == 44, "WAV header must be 44 bytes");
 
-// Function Prototypes
-void stopRecording();
-void uploadFile(const char *filename);
-void publishRecordingProgress();
+// ============================================================================
+// Helpers
+// ============================================================================
+
+void fillWavHeader(WAVHeader &h, uint32_t samples) {
+  h.dataSize = samples * NUM_CHANNELS * (BITS_PER_SAMPLE / 8);
+  h.fileSize = h.dataSize + sizeof(WAVHeader) - 8;
+}
+
+RecState getRecState() {
+  RecState copy;
+  portENTER_CRITICAL(&stateMux);
+  copy = recState;
+  portEXIT_CRITICAL(&stateMux);
+  return copy;
+}
+
+bool endsWith(const char *s, const char *suffix) {
+  size_t ls = strlen(s), lx = strlen(suffix);
+  return ls >= lx && strcmp(s + ls - lx, suffix) == 0;
+}
+
+const char *baseName(const char *path) {
+  const char *slash = strrchr(path, '/');
+  return slash ? slash + 1 : path;
+}
+
+bool isUploadedPath(const char *path) {
+  return strncmp(path, UP_DIR "/", strlen(UP_DIR) + 1) == 0;
+}
+
+bool isCurrentRecording(const char *path) {
+  RecState s = getRecState();
+  return s.active && strcmp(s.filename, path) == 0;
+}
+
+bool isBusyFile(const char *path) {
+  return isCurrentRecording(path) || strcmp(path, currentUploadPath) == 0;
+}
+
+bool isRejected(const char *path) {
+  for (int i = 0; i < rejectedCount; i++)
+    if (strcmp(rejectedFiles[i], path) == 0)
+      return true;
+  return false;
+}
+
+void addRejected(const char *path) {
+  if (isRejected(path))
+    return;
+  int slot = rejectedCount < MAX_REJECTED ? rejectedCount++
+                                          : (MAX_REJECTED - 1);
+  strlcpy(rejectedFiles[slot], path, MAX_PATH_LEN);
+}
+
+bool enqueueJob(JobType type, const char *filename) {
+  for (int i = 0; i < jobCount; i++)
+    if (jobs[i].type == type && strcmp(jobs[i].filename, filename) == 0)
+      return true; // already queued
+  if (jobCount >= MAX_JOBS)
+    return false;
+  jobs[jobCount].type = type;
+  strlcpy(jobs[jobCount].filename, filename, MAX_PATH_LEN);
+  jobCount++;
+  return true;
+}
+
+const char *resetReasonText() {
+  switch (esp_reset_reason()) {
+  case ESP_RST_POWERON:
+    return "power_on";
+  case ESP_RST_SW:
+    return "software";
+  case ESP_RST_PANIC:
+    return "crash";
+  case ESP_RST_INT_WDT:
+  case ESP_RST_TASK_WDT:
+  case ESP_RST_WDT:
+    return "watchdog";
+  case ESP_RST_BROWNOUT:
+    return "brownout";
+  case ESP_RST_DEEPSLEEP:
+    return "deep_sleep";
+  case ESP_RST_EXT:
+    return "external";
+  default:
+    return "unknown";
+  }
+}
+
+bool timeSynced() { return time(nullptr) > 1700000000; }
+
+// ============================================================================
+// Configuration (NVS + WiFiManager)
+// ============================================================================
 
 void saveConfigCallback() {
   Serial.println("Should save config");
@@ -133,14 +365,20 @@ void loadConfiguration() {
       preferences.getString("token", "0ymJiyM4OjSM5HV1QvZiKqPMKquAbY3n");
   String savedIp = preferences.getString("server_ip", "192.168.97.91");
   SERVER_PORT = preferences.getInt("server_port", 8000);
-
-  strncpy(DEVICE_ID, savedId.c_str(), sizeof(DEVICE_ID));
-  strncpy(DEVICE_TOKEN, savedToken.c_str(), sizeof(DEVICE_TOKEN));
-  strncpy(SERVER_IP, savedIp.c_str(), sizeof(SERVER_IP));
-
+  autoUpload = preferences.getBool("auto_upload", true);
+  micGain = preferences.getFloat("gain", 1.0f);
+  bootCount = preferences.getUInt("boot_count", 0) + 1;
+  preferences.putUInt("boot_count", bootCount);
   preferences.end();
-  Serial.printf("Loaded Config: ID=%s, Server=%s:%d\n", DEVICE_ID, SERVER_IP,
-                SERVER_PORT);
+
+  strlcpy(DEVICE_ID, savedId.c_str(), sizeof(DEVICE_ID));
+  strlcpy(DEVICE_TOKEN, savedToken.c_str(), sizeof(DEVICE_TOKEN));
+  strlcpy(SERVER_IP, savedIp.c_str(), sizeof(SERVER_IP));
+
+  Serial.printf("Loaded Config: ID=%s, Server=%s:%d, AutoUpload=%s, "
+                "Gain=%.1f, Boot=%u\n",
+                DEVICE_ID, SERVER_IP, SERVER_PORT, autoUpload ? "ON" : "OFF",
+                (float)micGain, bootCount);
 }
 
 void saveConfiguration(const char *id, const char *token, const char *ip,
@@ -154,10 +392,19 @@ void saveConfiguration(const char *id, const char *token, const char *ip,
   Serial.println("Config saved to NVS");
 }
 
-void setupWiFi() {
-  loadConfiguration();
+void saveAutoUpload(bool enabled) {
+  preferences.begin("noisemon", false);
+  preferences.putBool("auto_upload", enabled);
+  preferences.end();
+}
 
-  // Custom parameters for WiFiManager
+void saveGain(float gain) {
+  preferences.begin("noisemon", false);
+  preferences.putFloat("gain", gain);
+  preferences.end();
+}
+
+void setupWiFi() {
   WiFiManagerParameter custom_device_id("device_id", "Device ID", DEVICE_ID,
                                         32);
   WiFiManagerParameter custom_device_token("token", "Device Token",
@@ -174,28 +421,33 @@ void setupWiFi() {
   wm.addParameter(&custom_server_ip);
   wm.addParameter(&custom_server_port);
   wm.setSaveConfigCallback(saveConfigCallback);
+  wm.setConnectTimeout(20);
+  // Jangan terjebak selamanya di portal konfigurasi
+  wm.setConfigPortalTimeout(180);
 
-  // Use a unique name for the AP
   String apName = "Noisemon_" + String(DEVICE_ID);
   if (!wm.autoConnect(apName.c_str())) {
-    Serial.println("failed to connect and hit timeout");
+    Serial.println("WiFi failed to connect and hit timeout, restarting");
     delay(3000);
     ESP.restart();
   }
 
-  // Save the custom parameters to Preferences if changed
   if (shouldSaveConfig) {
-    strncpy(DEVICE_ID, custom_device_id.getValue(), sizeof(DEVICE_ID));
-    strncpy(DEVICE_TOKEN, custom_device_token.getValue(), sizeof(DEVICE_TOKEN));
-    strncpy(SERVER_IP, custom_server_ip.getValue(), sizeof(SERVER_IP));
+    strlcpy(DEVICE_ID, custom_device_id.getValue(), sizeof(DEVICE_ID));
+    strlcpy(DEVICE_TOKEN, custom_device_token.getValue(), sizeof(DEVICE_TOKEN));
+    strlcpy(SERVER_IP, custom_server_ip.getValue(), sizeof(SERVER_IP));
     SERVER_PORT = atoi(custom_server_port.getValue());
     saveConfiguration(DEVICE_ID, DEVICE_TOKEN, SERVER_IP, SERVER_PORT);
   }
 
-  Serial.println("\nWiFi connected!");
-  Serial.print("IP: ");
+  WiFi.setAutoReconnect(true);
+  Serial.print("WiFi connected! IP: ");
   Serial.println(WiFi.localIP());
 }
+
+// ============================================================================
+// Hardware setup
+// ============================================================================
 
 void setupI2S() {
   const i2s_config_t i2s_config = {
@@ -203,9 +455,9 @@ void setupI2S() {
       .sample_rate = SAMPLING_FREQ,
       .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
       .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
-      .communication_format =
-          (i2s_comm_format_t)(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB),
+      .communication_format = I2S_COMM_FORMAT_STAND_I2S,
       .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+      // 16 x 512 sample = ~0.5 detik buffer DMA untuk menyerap jeda tulis SD
       .dma_buf_count = 16,
       .dma_buf_len = 512,
       .use_apll = false};
@@ -220,155 +472,320 @@ void setupI2S() {
   Serial.println("I2S initialized");
 }
 
-void setupSD() {
-  if (!SD.begin(SD_CS)) {
-    Serial.println("SD Card Mount Failed!");
-    return;
+// Pindahkan file lama ke struktur folder baru:
+//  - /rec_xxx.wav (firmware v2, di root)  -> /rec/rec_xxx.wav
+//  - /rec/x.wav + penanda /rec/x.wav.up   -> /rec/up/x.wav
+void migrateLegacyFiles() {
+  char path[MAX_PATH_LEN], dest[MAX_PATH_LEN];
+
+  File root = SD.open("/");
+  if (root) {
+    File f;
+    while ((f = root.openNextFile())) {
+      bool isDir = f.isDirectory();
+      snprintf(path, sizeof(path), "/%s", baseName(f.name()));
+      f.close();
+      if (isDir || !endsWith(path, ".wav"))
+        continue;
+      snprintf(dest, sizeof(dest), REC_DIR "/%s", baseName(path));
+      if (!SD.exists(dest) && SD.rename(path, dest))
+        Serial.printf("Migrated %s -> %s\n", path, dest);
+    }
+    root.close();
   }
-  Serial.println("SD Card initialized");
+
+  File dir = SD.open(REC_DIR);
+  if (dir) {
+    File f;
+    while ((f = dir.openNextFile())) {
+      snprintf(path, sizeof(path), REC_DIR "/%s", baseName(f.name()));
+      f.close();
+      if (!endsWith(path, ".wav.up"))
+        continue;
+      char wav[MAX_PATH_LEN];
+      strlcpy(wav, path, sizeof(wav));
+      wav[strlen(wav) - 3] = '\0'; // buang ".up"
+      snprintf(dest, sizeof(dest), UP_DIR "/%s", baseName(wav));
+      if (SD.exists(wav) && !SD.exists(dest))
+        SD.rename(wav, dest);
+      SD.remove(path);
+    }
+    dir.close();
+  }
 }
 
-void publishRecordingStatus(const char *status) {
+// Mount SD card (aman dipanggil ulang). Tidak me-remount saat merekam.
+bool ensureSD() {
+  if (sdReady && SD.cardType() != CARD_NONE)
+    return true;
+  if (getRecState().active)
+    return false;
+
+  SD.end();
+  sdReady = SD.begin(SD_CS);
+  if (!sdReady) {
+    Serial.println("SD Card mount failed!");
+    return false;
+  }
+  if (!SD.exists(REC_DIR))
+    SD.mkdir(REC_DIR);
+  if (!SD.exists(UP_DIR))
+    SD.mkdir(UP_DIR);
+  migrateLegacyFiles();
+  Serial.printf("SD Card ready: %llu MB total, %llu MB free\n",
+                SD.totalBytes() / (1024 * 1024),
+                (SD.totalBytes() - SD.usedBytes()) / (1024 * 1024));
+  return true;
+}
+
+uint64_t sdFreeBytes() { return SD.totalBytes() - SD.usedBytes(); }
+
+// ============================================================================
+// Audio task (I2S -> gain -> SD card + FFT frame)
+// ============================================================================
+
+static File recFile; // hanya dipakai audioTask
+
+static void sendRecEvt(RecEvtType type, const char *filename, uint32_t samples,
+                       uint32_t planned, bool writeError) {
+  RecEvt evt = {};
+  evt.type = type;
+  strlcpy(evt.filename, filename, sizeof(evt.filename));
+  evt.samples = samples;
+  evt.plannedSeconds = planned;
+  evt.writeError = writeError;
+  xQueueSend(recEvtQueue, &evt, 0);
+}
+
+static void audioStartRecording(const RecCmd &cmd) {
+  if (recState.active) // hanya audioTask yang menulis recState
+    return;
+
+  // Jangan pernah menimpa rekaman yang sudah ada
+  if (SD.exists(cmd.filename)) {
+    sendRecEvt(REC_EVT_OPEN_FAILED, cmd.filename, 0, cmd.durationSeconds,
+               false);
+    return;
+  }
+
+  recFile = SD.open(cmd.filename, FILE_WRITE);
+  if (!recFile) {
+    sendRecEvt(REC_EVT_OPEN_FAILED, cmd.filename, 0, cmd.durationSeconds,
+               false);
+    return;
+  }
+
+  WAVHeader header;
+  fillWavHeader(header, 0);
+  recFile.write((uint8_t *)&header, sizeof(header));
+
+  uint32_t seconds = cmd.durationSeconds;
+  if (seconds == 0 || seconds > MAX_RECORDING_SECONDS)
+    seconds = MAX_RECORDING_SECONDS; // manual stop tetap dibatasi 4 jam
+
+  portENTER_CRITICAL(&stateMux);
+  recState.active = true;
+  strlcpy(recState.filename, cmd.filename, sizeof(recState.filename));
+  recState.samples = 0;
+  recState.targetSamples = (uint32_t)SAMPLING_FREQ * seconds;
+  recState.plannedSeconds = cmd.durationSeconds;
+  portEXIT_CRITICAL(&stateMux);
+
+  sendRecEvt(REC_EVT_STARTED, cmd.filename, 0, cmd.durationSeconds, false);
+}
+
+static void audioSyncHeader(uint32_t samples) {
+  WAVHeader header;
+  fillWavHeader(header, samples);
+  size_t end = recFile.position();
+  recFile.seek(0);
+  recFile.write((uint8_t *)&header, sizeof(header));
+  recFile.seek(end);
+  recFile.flush();
+}
+
+static void audioFinishRecording(bool writeError) {
+  if (!recState.active)
+    return;
+
+  RecState s = getRecState();
+  if (recFile) {
+    WAVHeader header;
+    fillWavHeader(header, s.samples);
+    recFile.seek(0);
+    recFile.write((uint8_t *)&header, sizeof(header));
+    recFile.close();
+  }
+
+  // Tandai selesai SETELAH file ditutup supaya loop tidak meng-upload
+  // file yang masih terbuka.
+  portENTER_CRITICAL(&stateMux);
+  recState.active = false;
+  portEXIT_CRITICAL(&stateMux);
+
+  sendRecEvt(REC_EVT_COMPLETED, s.filename, s.samples, s.plannedSeconds,
+             writeError);
+}
+
+void audioTask(void *param) {
+  static int16_t buf[SAMPLES];
+  unsigned long lastHeaderSync = 0;
+
+  for (;;) {
+    RecCmd cmd;
+    while (xQueueReceive(recCmdQueue, &cmd, 0) == pdTRUE) {
+      if (cmd.type == REC_CMD_START) {
+        audioStartRecording(cmd);
+        lastHeaderSync = millis();
+      } else if (cmd.type == REC_CMD_STOP) {
+        audioFinishRecording(false);
+      }
+    }
+
+    size_t bytesRead = 0;
+    i2s_read(I2S_NUM_0, buf, sizeof(buf), &bytesRead, portMAX_DELAY);
+    int n = bytesRead / sizeof(int16_t);
+    if (n <= 0)
+      continue;
+
+    // Gain dengan clipping (hindari overflow int16 yang bikin "kresek")
+    float gain = micGain;
+    if (gain != 1.0f) {
+      for (int i = 0; i < n; i++) {
+        int32_t v = lroundf(buf[i] * gain);
+        if (v > 32767)
+          v = 32767;
+        else if (v < -32768)
+          v = -32768;
+        buf[i] = (int16_t)v;
+      }
+    }
+
+    if (recState.active && recFile) {
+      size_t want = n * sizeof(int16_t);
+      unsigned long t0 = millis();
+      size_t written = recFile.write((uint8_t *)buf, want);
+      uint32_t took = millis() - t0;
+      if (took > maxWriteMs)
+        maxWriteMs = took;
+      if (took > SLOW_WRITE_MS)
+        slowWrites = slowWrites + 1;
+
+      if (written != want) {
+        Serial.println("SD write failed (card full/removed?), stopping");
+        sdWriteErrors = sdWriteErrors + 1;
+        audioFinishRecording(true);
+      } else {
+        portENTER_CRITICAL(&stateMux);
+        recState.samples += n;
+        uint32_t samples = recState.samples;
+        uint32_t target = recState.targetSamples;
+        portEXIT_CRITICAL(&stateMux);
+
+        if (target > 0 && samples >= target) {
+          audioFinishRecording(false);
+        } else if (millis() - lastHeaderSync >= HEADER_SYNC_MS) {
+          lastHeaderSync = millis();
+          audioSyncHeader(samples);
+        }
+      }
+    }
+
+    // Serahkan frame segar ke loop untuk FFT
+    if (fftFrameRequested && !fftFrameReady) {
+      for (int i = 0; i < n; i++)
+        fftFrame[i] = buf[i] / REFERENCE_AMPLITUDE;
+      fftFrameLen = n;
+      fftFrameRequested = false;
+      fftFrameReady = true;
+    }
+  }
+}
+
+// ============================================================================
+// MQTT publishing (hanya dari loop)
+// ============================================================================
+
+void publishJson(const char *topic, JsonDocument &doc, bool retained = false) {
+  if (!mqttClient.connected())
+    return;
+  static char buffer[3072];
+  size_t len = serializeJson(doc, buffer, sizeof(buffer));
+  mqttClient.publish(topic, (const uint8_t *)buffer, len, retained);
+}
+
+void publishRecordingStatus(const char *status, const char *filename = nullptr,
+                            uint32_t durationSec = 0, uint32_t sizeBytes = 0,
+                            int progress = -1, const char *error = nullptr) {
   JsonDocument doc;
   doc["status"] = status;
   doc["device_id"] = DEVICE_ID;
-  doc["timestamp"] = millis();
-
-  if (strlen(status) > 0) {
-    if (strcmp(status, "completed") == 0 || strcmp(status, "idle") == 0) {
-      // Include file info so Laravel can register the on-device file
-      doc["filename"] = currentFilename;
-      doc["duration"] = plannedDurationSeconds;
-      doc["samples"] = recordedSamples;
-      doc["size"] = recordedSamples * 2 + 44;
-    }
+  doc["timestamp"] = (uint32_t)time(nullptr);
+  if (filename && filename[0]) {
+    doc["filename"] = filename;
+    doc["duration"] = durationSec;
+    doc["size"] = sizeBytes;
   }
-
-  char buffer[256];
-  serializeJson(doc, buffer);
-  mqttClient.publish(recording_status_topic, buffer);
-  Serial.printf("Published recording status: %s\n", status);
+  if (progress >= 0)
+    doc["progress"] = progress;
+  if (error && error[0])
+    doc["error"] = error;
+  publishJson(recording_status_topic, doc);
+  Serial.printf("Recording status: %s %s %s\n", status, filename ? filename : "",
+                error ? error : "");
 }
 
 void publishRecordingProgress() {
-  if (!isRecording)
+  RecState s = getRecState();
+  if (!s.active)
     return;
 
   JsonDocument doc;
   doc["status"] = "recording";
   doc["device_id"] = DEVICE_ID;
-  doc["filename"] = currentFilename;
-  doc["elapsed"] = (millis() - recordingStartMillis) / 1000;
-  doc["duration"] = plannedDurationSeconds;
-  doc["samples"] = recordedSamples;
-  doc["size"] = recordedSamples * 2 + 44;
-
-  char buffer[256];
-  serializeJson(doc, buffer);
-  mqttClient.publish(recording_status_topic, buffer);
+  doc["filename"] = s.filename;
+  doc["elapsed"] = s.samples / SAMPLING_FREQ;
+  doc["duration"] = s.plannedSeconds;
+  doc["samples"] = s.samples;
+  doc["size"] = s.samples * 2 + sizeof(WAVHeader);
+  publishJson(recording_status_topic, doc);
 }
 
-void startRecording(const char *filename, uint32_t durationSeconds) {
-  if (isRecording)
-    return;
+// Hitung FFT dari frame terbaru dan publish ke audio/<id>/data
+void publishAudioData() {
+  int n = fftFrameLen;
+  if (n <= 0 || n > SAMPLES)
+    n = SAMPLES;
 
-  if (SD.exists(filename)) {
-    SD.remove(filename);
+  double sumSq = 0;
+  for (int i = 0; i < SAMPLES; i++) {
+    float v = (i < n) ? fftFrame[i] : 0.0f;
+    vReal[i] = v;
+    vImag[i] = 0;
+    sumSq += (double)v * v;
   }
+  fftFrameReady = false;
 
-  audioFile = SD.open(filename, FILE_WRITE);
-  if (!audioFile) {
-    Serial.println("Failed to open file for writing");
-    return;
-  }
-
-  // Write placeholder header
-  WAVHeader header;
-  audioFile.write((uint8_t *)&header, sizeof(header));
-
-  recordedSamples = 0;
-  isRecording = true;
-  currentFilename = String(filename);
-  plannedDurationSeconds = durationSeconds;
-  recordingStartMillis = millis();
-  totalSamplesToRecord =
-      (durationSeconds > 0) ? (uint32_t)SAMPLING_FREQ * durationSeconds : 0;
-
-  publishRecordingStatus("recording");
-  Serial.printf("Started recording: %s (%u seconds, auto-stop %s)\n",
-                filename, durationSeconds,
-                totalSamplesToRecord > 0 ? "ON" : "OFF");
-}
-
-void stopRecording() {
-  if (!isRecording)
-    return;
-
-  isRecording = false;
-
-  // Update WAV header
-  uint32_t dataSize = recordedSamples * 2;
-  WAVHeader header;
-  header.dataSize = dataSize;
-  header.fileSize = dataSize + sizeof(WAVHeader) - 8;
-
-  audioFile.seek(0);
-  audioFile.write((uint8_t *)&header, sizeof(header));
-  audioFile.close();
-
-  // File stays on SD card. Laravel requests upload on-demand (upload_file).
-  publishRecordingStatus("completed");
-  Serial.printf("Recording finished! %u samples. File kept on SD: %s\n",
-                recordedSamples, currentFilename.c_str());
-}
-
-void processFFTAndPublish(double rms) {
-  // 1. Calculate dB SPL (Always do this as it's cheap)
+  double rms = sqrt(sumSq / n);
   float dbSPL = 0;
   if (rms > 0.0001) {
     dbSPL = 20.0 * log10(rms * REFERENCE_AMPLITUDE) + 30.0;
   }
 
-  // 2. Optimization: Skip heavy FFT if recording to save CPU/Network
-  // Or at least only do it every 3 seconds instead of 1
-  if (isRecording) {
-    static unsigned long lastRecFFT = 0;
-    if (millis() - lastRecFFT < 3000) {
-      // Still send minimal status over MQTT so UI knows we are alive
-      JsonDocument doc;
-      doc["device_id"] = DEVICE_ID;
-      doc["token"] = DEVICE_TOKEN;
-      doc["status"] = "recording";
-      doc["audio"]["db_spl"] = dbSPL;
-
-      char buffer[256];
-      serializeJson(doc, buffer);
-      mqttClient.publish(data_topic, buffer);
-      return;
-    }
-    lastRecFFT = millis();
-  }
-
-  // Compute FFT (Heavy)
   FFT.windowing(vReal, SAMPLES, FFT_WIN_TYP_HAMMING, FFT_FORWARD);
   FFT.compute(vReal, vImag, SAMPLES, FFT_FORWARD);
   FFT.complexToMagnitude(vReal, vImag, SAMPLES);
+  float peak_freq = FFT.majorPeak(vReal, SAMPLES, SAMPLING_FREQ);
 
-  double peak_freq = FFT.majorPeak(vReal, SAMPLES, SAMPLING_FREQ);
-
-  // Spectrum & Band Energy
   int spectrum[64];
   int bin_size = (SAMPLES / 2) / 64;
   long low = 0, mid = 0, high = 0;
-
   for (int i = 0; i < 64; i++) {
     double avg = 0;
-    for (int j = 0; j < bin_size; j++) {
+    for (int j = 0; j < bin_size; j++)
       avg += vReal[i * bin_size + j];
-    }
     avg /= bin_size;
     spectrum[i] = constrain((int)(avg * 100), 0, 100);
-
     if (i < 20)
       low += spectrum[i];
     else if (i < 40)
@@ -377,10 +794,11 @@ void processFFTAndPublish(double rms) {
       high += spectrum[i];
   }
 
-  // Build JSON
   JsonDocument doc;
   doc["device_id"] = DEVICE_ID;
   doc["token"] = DEVICE_TOKEN;
+  if (getRecState().active)
+    doc["status"] = "recording";
 
   JsonObject audio = doc["audio"].to<JsonObject>();
   audio["rms"] = rms;
@@ -388,310 +806,917 @@ void processFFTAndPublish(double rms) {
 
   JsonObject fft = doc["fft"].to<JsonObject>();
   fft["peak_frequency"] = (int)peak_freq;
-  fft["total_energy"] = (int)(rms * 1000); // Approximation
-
+  fft["total_energy"] = (int)(rms * 1000);
   JsonObject band = fft["band_energy"].to<JsonObject>();
   band["low"] = low;
   band["mid"] = mid;
   band["high"] = high;
-
   JsonArray specArr = fft["spectrum"].to<JsonArray>();
   for (int i = 0; i < 64; i++)
     specArr.add(spectrum[i]);
 
-  if (isRecording) {
-    doc["status"] = "recording"; // Add status flag so UI knows
-  }
-
-  char buffer[2048];
-  serializeJson(doc, buffer);
-  mqttClient.publish(data_topic, buffer);
-  // Serial.println("Published FFT data");
+  publishJson(data_topic, doc);
 }
 
-void uploadFile(const char *filename) {
+// ============================================================================
+// SD card housekeeping
+// ============================================================================
+
+// Cari file .wav paling lama (urut nama = urut waktu) di folder dir.
+// skipRejected=true untuk pencarian file yang akan di-upload otomatis.
+bool findOldestWav(const char *dirPath, bool skipRejected, char *out,
+                   size_t len) {
+  File dir = SD.open(dirPath);
+  if (!dir || !dir.isDirectory())
+    return false;
+
+  bool found = false;
+  out[0] = '\0';
+  File f;
+  while ((f = dir.openNextFile())) {
+    char path[MAX_PATH_LEN];
+    snprintf(path, sizeof(path), "%s/%s", dirPath, baseName(f.name()));
+    bool isDir = f.isDirectory();
+    f.close();
+
+    if (isDir || !endsWith(path, ".wav") || isBusyFile(path))
+      continue;
+    if (skipRejected && isRejected(path))
+      continue;
+
+    if (!found || strcmp(path, out) < 0) {
+      strlcpy(out, path, len);
+      found = true;
+    }
+  }
+  dir.close();
+  return found;
+}
+
+void countWav(const char *dirPath, uint32_t &count, uint64_t &bytes) {
+  count = 0;
+  bytes = 0;
+  File dir = SD.open(dirPath);
+  if (!dir || !dir.isDirectory())
+    return;
+  File f;
+  while ((f = dir.openNextFile())) {
+    if (!f.isDirectory() && endsWith(f.name(), ".wav")) {
+      count++;
+      bytes += f.size();
+    }
+    f.close();
+  }
+  dir.close();
+}
+
+SdSummary summarizeSd() {
+  SdSummary s = {};
+  countWav(REC_DIR, s.pendingFiles, s.pendingBytes);
+  countWav(UP_DIR, s.uploadedFiles, s.uploadedBytes);
+  return s;
+}
+
+// Laravel menyimpan path saat rekaman selesai (/rec/x.wav). Setelah upload
+// file pindah ke /rec/up/x.wav, dan file v2 lama pindah dari root. Cari
+// file berdasarkan namanya di semua lokasi tersebut.
+bool resolvePath(const char *requested, char *out, size_t len) {
+  if (SD.exists(requested)) {
+    strlcpy(out, requested, len);
+    return true;
+  }
+  const char *dirs[] = {REC_DIR, UP_DIR};
+  for (const char *d : dirs) {
+    snprintf(out, len, "%s/%s", d, baseName(requested));
+    if (SD.exists(out))
+      return true;
+  }
+  out[0] = '\0';
+  return false;
+}
+
+// Pindahkan file yang sudah ter-upload ke /rec/up (tetap disimpan)
+void moveToUploaded(const char *path) {
+  if (isUploadedPath(path))
+    return;
+  char dest[MAX_PATH_LEN];
+  snprintf(dest, sizeof(dest), UP_DIR "/%s", baseName(path));
+  if (SD.exists(dest))
+    SD.remove(dest);
+  if (!SD.rename(path, dest))
+    Serial.printf("Failed to move %s to %s\n", path, dest);
+}
+
+bool deleteRecordingFile(const char *path) {
+  if (isBusyFile(path))
+    return false;
+  return SD.remove(path);
+}
+
+// Pastikan ada ruang kosong >= neededBytes dengan menghapus rekaman lama
+// yang SUDAH ter-upload. Rekaman yang belum ter-upload tidak disentuh.
+bool ensureFreeSpace(uint64_t neededBytes) {
+  uint64_t freeBytes = sdFreeBytes();
+  while (freeBytes < neededBytes) {
+    char oldest[MAX_PATH_LEN];
+    if (!findOldestWav(UP_DIR, false, oldest, sizeof(oldest)))
+      break;
+    Serial.printf("SD low on space, deleting uploaded file %s\n", oldest);
+    if (!deleteRecordingFile(oldest))
+      break;
+    publishRecordingStatus("file_deleted", oldest, 0, 0, -1, "sd_full_cleanup");
+    freeBytes = sdFreeBytes();
+  }
+  return freeBytes >= neededBytes;
+}
+
+// Kirim daftar semua rekaman di SD ke audio/<id>/files, 25 file per pesan
+void publishFileList() {
+  if (!ensureSD()) {
+    JsonDocument doc;
+    doc["device_id"] = DEVICE_ID;
+    doc["list_id"] = millis();
+    doc["page"] = 0;
+    doc["last"] = true;
+    doc["error"] = "sd_error";
+    doc["files"].to<JsonArray>();
+    publishJson(files_topic, doc);
+    return;
+  }
+
+  const uint32_t listId = millis();
+  const int PER_PAGE = 25;
+  int page = 0;
+  JsonDocument doc;
+  JsonArray files;
+
+  auto startPage = [&]() {
+    doc.clear();
+    doc["device_id"] = DEVICE_ID;
+    doc["list_id"] = listId;
+    doc["page"] = page;
+    files = doc["files"].to<JsonArray>();
+  };
+  auto flushPage = [&](bool last) {
+    doc["last"] = last;
+    publishJson(files_topic, doc);
+    mqttClient.loop();
+    page++;
+    startPage();
+  };
+
+  startPage();
+  const char *dirs[] = {REC_DIR, UP_DIR};
+  for (const char *d : dirs) {
+    File dir = SD.open(d);
+    if (!dir)
+      continue;
+    File f;
+    while ((f = dir.openNextFile())) {
+      bool isDir = f.isDirectory();
+      char path[MAX_PATH_LEN];
+      snprintf(path, sizeof(path), "%s/%s", d, baseName(f.name()));
+      uint32_t size = f.size();
+      f.close();
+      if (isDir || !endsWith(path, ".wav"))
+        continue;
+
+      JsonObject o = files.add<JsonObject>();
+      o["n"] = path;
+      o["s"] = size;
+      o["u"] = isUploadedPath(path) ? 1 : 0;
+      if (isCurrentRecording(path))
+        o["r"] = 1; // sedang direkam
+
+      if (files.size() >= PER_PAGE)
+        flushPage(false);
+    }
+    dir.close();
+  }
+  flushPage(true);
+  Serial.printf("Published file list (%d pages)\n", page);
+}
+
+void publishHealth() {
+  JsonDocument doc;
+  doc["device_id"] = DEVICE_ID;
+  doc["fw"] = FW_VERSION;
+  doc["timestamp"] = (uint32_t)time(nullptr);
+  doc["uptime"] = millis() / 1000;
+  doc["boot_count"] = bootCount;
+  doc["reset_reason"] = resetReasonText();
+  doc["heap_free"] = ESP.getFreeHeap();
+  doc["heap_min"] = ESP.getMinFreeHeap();
+
+  JsonObject net = doc["wifi"].to<JsonObject>();
+  net["rssi"] = WiFi.RSSI();
+  net["ip"] = WiFi.localIP().toString();
+  net["ntp"] = timeSynced();
+
+  JsonObject sd = doc["sd"].to<JsonObject>();
+  bool ok = ensureSD();
+  sd["ok"] = ok;
+  if (ok) {
+    SdSummary s = summarizeSd();
+    sd["total_mb"] = (uint32_t)(SD.totalBytes() / (1024 * 1024));
+    sd["free_mb"] = (uint32_t)(sdFreeBytes() / (1024 * 1024));
+    sd["pending_files"] = s.pendingFiles;
+    sd["pending_mb"] = (uint32_t)(s.pendingBytes / (1024 * 1024));
+    sd["uploaded_files"] = s.uploadedFiles;
+    sd["uploaded_mb"] = (uint32_t)(s.uploadedBytes / (1024 * 1024));
+  }
+  sd["max_write_ms"] = maxWriteMs;
+  sd["slow_writes"] = slowWrites;
+  sd["write_errors"] = sdWriteErrors;
+  maxWriteMs = 0; // per periode
+
+  RecState r = getRecState();
+  JsonObject rec = doc["recording"].to<JsonObject>();
+  rec["active"] = r.active;
+  if (r.active) {
+    rec["filename"] = r.filename;
+    rec["elapsed"] = r.samples / SAMPLING_FREQ;
+    rec["duration"] = r.plannedSeconds;
+  }
+
+  JsonObject up = doc["upload"].to<JsonObject>();
+  up["auto"] = autoUpload;
+  up["active"] = isUploading;
+  if (isUploading)
+    up["filename"] = currentUploadPath;
+  up["upload_all"] = uploadAllActive;
+  long retryIn = (long)(nextAutoUploadAt - millis()) / 1000;
+  up["next_retry_s"] = retryIn > 0 ? retryIn : 0;
+  if (lastUploadError[0])
+    up["last_error"] = lastUploadError;
+  up["rejected"] = rejectedCount;
+
+  doc["gain"] = micGain;
+
+  // Retained: halaman web langsung dapat kondisi terakhir saat subscribe
+  publishJson(health_topic, doc, true);
+}
+
+// ============================================================================
+// Recording control (dari loop / MQTT callback)
+// ============================================================================
+
+void makeRecordingFilename(char *out, size_t len) {
+  char base[MAX_PATH_LEN];
+  struct tm t;
+  if (getLocalTime(&t, 10) && (t.tm_year + 1900) >= 2024) {
+    snprintf(base, sizeof(base), REC_DIR "/%s_%04d%02d%02d_%02d%02d%02d",
+             DEVICE_ID, t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour,
+             t.tm_min, t.tm_sec);
+  } else {
+    // NTP belum sinkron: pakai boot counter supaya tetap unik setelah reboot
+    snprintf(base, sizeof(base), REC_DIR "/%s_boot%05u_%010lu", DEVICE_ID,
+             bootCount, millis());
+  }
+
+  // Unik di kedua folder (/rec dan /rec/up)
+  char tmp[MAX_PATH_LEN];
+  snprintf(out, len, "%s.wav", base);
+  for (int i = 1; i < 100 && resolvePath(out, tmp, sizeof(tmp)); i++)
+    snprintf(out, len, "%s_%d.wav", base, i);
+}
+
+void requestStartRecording(uint32_t durationSeconds) {
+  if (getRecState().active) {
+    Serial.println("Already recording, start ignored");
+    publishRecordingProgress();
+    return;
+  }
+  if (!ensureSD()) {
+    publishRecordingStatus("sd_error");
+    return;
+  }
+
+  if (durationSeconds > MAX_RECORDING_SECONDS)
+    durationSeconds = MAX_RECORDING_SECONDS;
+
+  // Usahakan ada ruang untuk seluruh durasi + cadangan
+  uint32_t plannedSec =
+      durationSeconds > 0 ? durationSeconds : MAX_RECORDING_SECONDS;
+  uint64_t needed = (uint64_t)plannedSec * BYTES_PER_SECOND + SD_RESERVE_BYTES;
+  if (!ensureFreeSpace(needed)) {
+    if (sdFreeBytes() < SD_RESERVE_BYTES) {
+      Serial.println("SD card full (no uploaded files left to delete)");
+      publishRecordingStatus("sd_full");
+      return;
+    }
+    Serial.println("Warning: SD may fill up before recording ends");
+  }
+
+  RecCmd cmd = {};
+  cmd.type = REC_CMD_START;
+  cmd.durationSeconds = durationSeconds;
+  makeRecordingFilename(cmd.filename, sizeof(cmd.filename));
+  xQueueSend(recCmdQueue, &cmd, pdMS_TO_TICKS(100));
+}
+
+void requestStopRecording() {
+  RecCmd cmd = {};
+  cmd.type = REC_CMD_STOP;
+  xQueueSend(recCmdQueue, &cmd, pdMS_TO_TICKS(100));
+}
+
+void processRecEvents() {
+  RecEvt evt;
+  while (xQueueReceive(recEvtQueue, &evt, 0) == pdTRUE) {
+    uint32_t durationSec = evt.samples / SAMPLING_FREQ;
+    uint32_t sizeBytes = evt.samples * 2 + sizeof(WAVHeader);
+
+    switch (evt.type) {
+    case REC_EVT_STARTED:
+      Serial.printf("Started recording: %s (%u s)\n", evt.filename,
+                    evt.plannedSeconds);
+      publishRecordingStatus("recording", evt.filename, evt.plannedSeconds, 0);
+      break;
+    case REC_EVT_OPEN_FAILED:
+      Serial.printf("Failed to open %s for writing\n", evt.filename);
+      sdReady = false; // paksa remount di percobaan berikutnya
+      publishRecordingStatus("sd_error", evt.filename);
+      break;
+    case REC_EVT_COMPLETED:
+      Serial.printf("Recording finished: %s (%u s, %u bytes)%s\n",
+                    evt.filename, durationSec, sizeBytes,
+                    evt.writeError ? " [SD write error]" : "");
+      if (evt.writeError)
+        sdReady = false;
+      publishRecordingStatus("completed", evt.filename, durationSec, sizeBytes,
+                             -1, evt.writeError ? "sd_write_error" : nullptr);
+      // Beri jeda sedikit agar Laravel mendaftarkan record lebih dulu
+      if (autoUpload)
+        nextAutoUploadAt = millis() + 2000;
+      break;
+    }
+  }
+}
+
+// Hentikan rekaman, tunggu file WAV ditutup, dan kirim status "completed"
+// sebelum restart (dipakai oleh restart / reset_wifi / update_wifi)
+void stopRecordingAndWait() {
+  if (getRecState().active) {
+    requestStopRecording();
+    unsigned long start = millis();
+    while (getRecState().active && millis() - start < 3000)
+      delay(20);
+  }
+  processRecEvents();
+  mqttClient.loop();
+  delay(200);
+}
+
+// ============================================================================
+// Upload to Laravel
+// ============================================================================
+
+unsigned long lastFFTTime = 0;
+unsigned long lastProgressTime = 0;
+
+// Dipanggil berkala selama upload supaya MQTT & FFT tetap jalan
+void serviceDuringUpload() {
+  mqttClient.loop();
+  processRecEvents();
+
+  if (millis() - lastFFTTime >= FFT_INTERVAL_MS) {
+    lastFFTTime = millis();
+    fftFrameRequested = true;
+  }
+  if (fftFrameReady)
+    publishAudioData();
+
+  if (getRecState().active &&
+      millis() - lastProgressTime >= PROGRESS_INTERVAL_MS) {
+    lastProgressTime = millis();
+    publishRecordingProgress();
+  }
+}
+
+void setUploadError(const char *msg) {
+  strlcpy(lastUploadError, msg, sizeof(lastUploadError));
+}
+
+// path harus path yang benar-benar ada (lihat resolvePath)
+UploadResult uploadFile(const char *path) {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi disconnected, cannot upload.");
-    publishRecordingStatus("upload_failed");
-    return;
+    setUploadError("wifi_disconnected");
+    publishRecordingStatus("upload_failed", path, 0, 0, -1, lastUploadError);
+    return UPLOAD_RETRY;
+  }
+  if (isCurrentRecording(path)) {
+    setUploadError("still_recording");
+    publishRecordingStatus("upload_failed", path, 0, 0, -1, lastUploadError);
+    return UPLOAD_RETRY;
   }
 
-  if (!SD.exists(filename)) {
-    Serial.printf("File does not exist: %s\n", filename);
-    publishRecordingStatus("upload_failed");
-    return;
-  }
-
-  File file = SD.open(filename, FILE_READ);
+  File file = SD.open(path, FILE_READ);
   if (!file) {
-    Serial.println("Failed to open file for reading");
-    publishRecordingStatus("upload_failed");
-    return;
+    setUploadError("sd_read_error");
+    publishRecordingStatus("upload_failed", path, 0, 0, -1, lastUploadError);
+    return UPLOAD_RETRY;
   }
 
   uint32_t fileSize = file.size();
-  Serial.printf("Uploading %s (%u bytes)...\n", filename, fileSize);
-
-  if (fileSize == 0) {
-    Serial.println("File is empty, skipping upload.");
+  if (fileSize <= sizeof(WAVHeader)) {
     file.close();
-    publishRecordingStatus("upload_failed");
-    return;
+    setUploadError("empty_file");
+    publishRecordingStatus("upload_failed", path, 0, fileSize, -1,
+                           lastUploadError);
+    return UPLOAD_REJECTED;
   }
+  uint32_t durationSec = (fileSize - sizeof(WAVHeader)) / BYTES_PER_SECOND;
 
   isUploading = true;
-  publishRecordingStatus("uploading");
+  strlcpy(currentUploadPath, path, sizeof(currentUploadPath));
+  publishRecordingStatus("uploading", path, durationSec, fileSize, 0);
+  Serial.printf("Uploading %s (%u bytes) to %s:%d\n", path, fileSize,
+                SERVER_IP, SERVER_PORT);
 
-  // Raw WiFiClient for manual multipart POST
+  UploadResult result = UPLOAD_RETRY;
   WiFiClient client;
-  const char *host = SERVER_IP;     // DYNAMIC
-  const int port = SERVER_PORT;     // DYNAMIC
-  String url = "/api/upload-audio"; // API Endpoint
 
-  if (!client.connect(host, port)) {
-    Serial.printf("Connection failed to %s:%d!\n", host, port);
-    file.close();
-    isUploading = false;
-    publishRecordingStatus("upload_failed");
-    return;
-  }
+  if (!client.connect(SERVER_IP, SERVER_PORT)) {
+    setUploadError("server_unreachable");
+  } else {
+    const String boundary = "----NoisemonBoundary7MA4YWxkTrZu0gW";
+    String head;
+    auto addField = [&](const char *name, const String &value) {
+      head += "--" + boundary + "\r\n";
+      head += "Content-Disposition: form-data; name=\"" + String(name) +
+              "\"\r\n\r\n" + value + "\r\n";
+    };
+    addField("device_id", DEVICE_ID);
+    addField("token", DEVICE_TOKEN);
+    addField("duration", String(durationSec));
+    // Path lengkap di SD (PHP memotong filename menjadi basename saja)
+    addField("sd_filename", path);
+    head += "--" + boundary + "\r\n";
+    head += "Content-Disposition: form-data; name=\"audio\"; filename=\"" +
+            String(baseName(path)) + "\"\r\n";
+    head += "Content-Type: audio/wav\r\n\r\n";
+    String tail = "\r\n--" + boundary + "--\r\n";
 
-  String boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW";
+    uint32_t contentLength = head.length() + fileSize + tail.length();
 
-  // Construct Multipart Head
-  String head = "--" + boundary + "\r\n";
-  head += "Content-Disposition: form-data; name=\"device_id\"\r\n\r\n" +
-          String(DEVICE_ID) + "\r\n";
-  head += "--" + boundary + "\r\n";
-  head += "Content-Disposition: form-data; name=\"token\"\r\n\r\n" +
-          String(DEVICE_TOKEN) + "\r\n";
-  head += "--" + boundary + "\r\n";
-  head += "Content-Disposition: form-data; name=\"duration\"\r\n\r\n" +
-          String(plannedDurationSeconds) + "\r\n";
-  head += "--" + boundary + "\r\n";
-  head += "Content-Disposition: form-data; name=\"audio\"; filename=\"" +
-          String(filename) + "\"\r\n";
-  head += "Content-Type: audio/wav\r\n\r\n";
+    client.print(String("POST ") + UPLOAD_PATH + " HTTP/1.1\r\n");
+    client.print(String("Host: ") + SERVER_IP + ":" + SERVER_PORT + "\r\n");
+    client.print("Accept: application/json\r\n");
+    client.print("Content-Type: multipart/form-data; boundary=" + boundary +
+                 "\r\n");
+    client.print("Content-Length: " + String(contentLength) + "\r\n");
+    client.print("Connection: close\r\n\r\n");
+    client.print(head);
 
-  String tail = "\r\n--" + boundary + "--\r\n";
+    static uint8_t buffer[4096];
+    uint32_t sent = 0;
+    bool sendOk = true;
+    unsigned long lastService = 0, lastReport = millis();
+    size_t bytesRead;
+    while ((bytesRead = file.read(buffer, sizeof(buffer))) > 0) {
+      if (client.write(buffer, bytesRead) != bytesRead) {
+        setUploadError("connection_lost");
+        sendOk = false;
+        break;
+      }
+      sent += bytesRead;
 
-  uint32_t contentLength = head.length() + fileSize + tail.length();
+      if (millis() - lastService >= 100) {
+        lastService = millis();
+        serviceDuringUpload();
+      }
+      if (millis() - lastReport >= PROGRESS_INTERVAL_MS) {
+        lastReport = millis();
+        int pct = (int)((uint64_t)sent * 100 / fileSize);
+        publishRecordingStatus("uploading", path, durationSec, fileSize, pct);
+      }
+    }
 
-  // Send HTTP Headers
-  client.println("POST " + url + " HTTP/1.1");
-  client.println("Host: " + String(host) + ":" + String(port));
-  client.println("Content-Type: multipart/form-data; boundary=" + boundary);
-  client.print("Content-Length: ");
-  client.println(contentLength);
-  client.println("Connection: close");
-  client.println(); // End of headers
+    if (sendOk && sent != fileSize) {
+      setUploadError("sd_read_error");
+      sendOk = false;
+    }
 
-  // Send Body
-  client.print(head);
+    if (sendOk) {
+      client.print(tail);
 
-  // Stream File
-  uint8_t buffer[4096];
-  size_t bytesRead;
-  while ((bytesRead = file.read(buffer, sizeof(buffer))) > 0) {
-    client.write(buffer, bytesRead);
-  }
+      // Tunggu status line: "HTTP/1.1 201 Created"
+      unsigned long start = millis();
+      while (client.connected() && !client.available() &&
+             millis() - start < HTTP_RESPONSE_TIMEOUT_MS) {
+        serviceDuringUpload();
+        delay(10);
+      }
 
-  client.print(tail);
+      if (client.available()) {
+        String statusLine = client.readStringUntil('\n');
+        statusLine.trim();
+        int code = 0;
+        int sp = statusLine.indexOf(' ');
+        if (sp > 0)
+          code = statusLine.substring(sp + 1, sp + 4).toInt();
+        Serial.printf("Server response: %s\n", statusLine.c_str());
 
-  // Read Response
-  unsigned long timeout = millis();
-  while (client.available() == 0) {
-    if (millis() - timeout > 30000) {
-      Serial.println("Timeout waiting for response");
-      client.stop();
-      file.close();
-      isUploading = false;
-      publishRecordingStatus("upload_failed");
-      return;
+        if (code == 200 || code == 201) {
+          result = UPLOAD_OK;
+        } else {
+          char msg[24];
+          snprintf(msg, sizeof(msg), "http_%d", code);
+          setUploadError(msg);
+          // Ditolak (validasi/token): jangan dicoba otomatis terus-menerus
+          if (code >= 400 && code < 500 && code != 408 && code != 429)
+            result = UPLOAD_REJECTED;
+        }
+      } else {
+        setUploadError("response_timeout");
+      }
     }
   }
-
-  // Skip headers
-  while (client.connected()) {
-    String line = client.readStringUntil('\n');
-    if (line == "\r")
-      break;
-  }
-
-  String responseLine = client.readStringUntil('\n');
-  Serial.println("Response: " + responseLine);
 
   client.stop();
   file.close();
   isUploading = false;
+  currentUploadPath[0] = '\0';
 
-  // Keep the file on SD until Laravel confirms it was stored.
-  // Laravel sends "delete_file" after successful upload.
-  if (responseLine.indexOf("201") > 0 || responseLine.indexOf("200") > 0) {
-    publishRecordingStatus("upload_completed");
+  if (result == UPLOAD_OK) {
+    lastUploadError[0] = '\0';
+    // File TETAP disimpan di SD, hanya dipindah ke /rec/up
+    moveToUploaded(path);
+    publishRecordingStatus("upload_completed", path, durationSec, fileSize,
+                           100);
   } else {
-    publishRecordingStatus("upload_failed");
+    publishRecordingStatus("upload_failed", path, durationSec, fileSize, -1,
+                           lastUploadError);
   }
-  Serial.println("Upload finished.");
+  return result;
 }
+
+void finishUploadAll(bool aborted) {
+  if (!uploadAllActive)
+    return;
+  uploadAllActive = false;
+  JsonDocument doc;
+  doc["status"] = "upload_all_done";
+  doc["device_id"] = DEVICE_ID;
+  doc["uploaded"] = uploadAllOk;
+  doc["failed"] = uploadAllFailed;
+  doc["aborted"] = aborted;
+  if (aborted && lastUploadError[0])
+    doc["error"] = lastUploadError;
+  publishJson(recording_status_topic, doc);
+  Serial.printf("upload_all done: %u ok, %u failed%s\n", uploadAllOk,
+                uploadAllFailed, aborted ? " (aborted)" : "");
+  pendingHealth = true;
+}
+
+// upload_all {force:true}: kembalikan file /rec/up ke /rec supaya di-upload ulang
+void startUploadAll(bool force) {
+  if (!ensureSD()) {
+    publishRecordingStatus("sd_error");
+    return;
+  }
+  if (force) {
+    char path[MAX_PATH_LEN], dest[MAX_PATH_LEN];
+    while (findOldestWav(UP_DIR, false, path, sizeof(path))) {
+      snprintf(dest, sizeof(dest), REC_DIR "/%s", baseName(path));
+      if (SD.exists(dest) || !SD.rename(path, dest))
+        break;
+    }
+  }
+  rejectedCount = 0; // beri kesempatan ulang
+  uploadAllActive = true;
+  uploadAllOk = 0;
+  uploadAllFailed = 0;
+  uploadBackoffMs = UPLOAD_BACKOFF_MIN_MS;
+  nextAutoUploadAt = millis();
+  JsonDocument doc;
+  doc["status"] = "upload_all_started";
+  doc["device_id"] = DEVICE_ID;
+  doc["force"] = force;
+  SdSummary s = summarizeSd();
+  doc["files"] = s.pendingFiles;
+  doc["mb"] = (uint32_t)(s.pendingBytes / (1024 * 1024));
+  publishJson(recording_status_topic, doc);
+}
+
+void deleteAllUploaded() {
+  if (!ensureSD())
+    return;
+  uint32_t deleted = 0;
+  char path[MAX_PATH_LEN];
+  while (findOldestWav(UP_DIR, false, path, sizeof(path))) {
+    if (!deleteRecordingFile(path))
+      break;
+    deleted++;
+  }
+  JsonDocument doc;
+  doc["status"] = "sd_cleaned";
+  doc["device_id"] = DEVICE_ID;
+  doc["deleted"] = deleted;
+  publishJson(recording_status_topic, doc);
+  Serial.printf("Deleted %u uploaded files from SD\n", deleted);
+  // Laravel menyinkronkan status SD dari daftar file terbaru
+  pendingListFiles = true;
+  pendingHealth = true;
+}
+
+void processJob(const Job &job) {
+  char path[MAX_PATH_LEN];
+  if (!ensureSD() || !resolvePath(job.filename, path, sizeof(path))) {
+    Serial.printf("Job: %s not found on SD\n", job.filename);
+    if (job.type == JOB_UPLOAD)
+      publishRecordingStatus("upload_failed", job.filename, 0, 0, -1,
+                             "not_found");
+    else
+      publishRecordingStatus("file_deleted", job.filename, 0, 0, -1,
+                             "not_found");
+    return;
+  }
+
+  if (job.type == JOB_UPLOAD) {
+    Serial.printf("Job: upload %s\n", path);
+    uploadFile(path);
+  } else if (job.type == JOB_DELETE) {
+    if (deleteRecordingFile(path)) {
+      Serial.printf("Job: deleted %s\n", path);
+      publishRecordingStatus("file_deleted", job.filename);
+    }
+  }
+}
+
+// Proses job on-demand dulu, lalu upload otomatis / upload_all
+void uploadManager() {
+  if (jobCount > 0) {
+    Job job = jobs[0];
+    for (int i = 1; i < jobCount; i++)
+      jobs[i - 1] = jobs[i];
+    jobCount--;
+    processJob(job);
+    return;
+  }
+
+  if (!autoUpload && !uploadAllActive)
+    return;
+  if (WiFi.status() != WL_CONNECTED)
+    return;
+  if ((long)(millis() - nextAutoUploadAt) < 0)
+    return;
+  if (!ensureSD()) {
+    nextAutoUploadAt = millis() + AUTO_UPLOAD_SCAN_MS;
+    return;
+  }
+
+  char path[MAX_PATH_LEN];
+  if (!findOldestWav(REC_DIR, true, path, sizeof(path))) {
+    finishUploadAll(false);
+    nextAutoUploadAt = millis() + AUTO_UPLOAD_SCAN_MS;
+    return;
+  }
+
+  UploadResult r = uploadFile(path);
+  if (r == UPLOAD_OK) {
+    uploadBackoffMs = UPLOAD_BACKOFF_MIN_MS;
+    nextAutoUploadAt = millis() + 1000; // lanjut file berikutnya
+    if (uploadAllActive)
+      uploadAllOk++;
+  } else if (r == UPLOAD_REJECTED) {
+    addRejected(path);
+    nextAutoUploadAt = millis() + 1000;
+    if (uploadAllActive)
+      uploadAllFailed++;
+  } else {
+    // Server/jaringan bermasalah: hentikan upload_all, lanjut dengan backoff
+    if (uploadAllActive) {
+      uploadAllFailed++;
+      finishUploadAll(true);
+    }
+    Serial.printf("Auto upload failed, retry in %lu s\n",
+                  uploadBackoffMs / 1000);
+    nextAutoUploadAt = millis() + uploadBackoffMs;
+    uploadBackoffMs = min(uploadBackoffMs * 2, UPLOAD_BACKOFF_MAX_MS);
+  }
+}
+
+// ============================================================================
+// MQTT
+// ============================================================================
 
 void mqttCallback(char *topic, byte *payload, unsigned int length) {
   JsonDocument doc;
-  deserializeJson(doc, payload, length);
+  if (deserializeJson(doc, payload, length)) {
+    Serial.println("MQTT: invalid JSON");
+    return;
+  }
   const char *action = doc["action"];
+  if (!action)
+    return;
 
   if (strcmp(topic, command_topic) == 0) {
+    Serial.printf("Command: %s\n", action);
     if (strcmp(action, "start_recording") == 0) {
-      // Duration in seconds (0 = record until manual stop)
-      uint32_t duration = doc["duration"] | 0;
-      String fname =
-          "/rec_" + String(DEVICE_ID) + "_" + String(millis()) + ".wav";
-      startRecording(fname.c_str(), duration);
+      requestStartRecording(doc["duration"] | 0);
     } else if (strcmp(action, "stop_recording") == 0) {
-      stopRecording();
+      requestStopRecording();
     } else if (strcmp(action, "upload_file") == 0) {
-      // On-demand upload: Laravel requests a specific file from the SD card
       const char *fname = doc["filename"];
-      if (fname && strlen(fname) > 0) {
-        Serial.printf("Command: Upload file %s\n", fname);
-        uploadFile(fname);
-      } else {
-        Serial.println("Command: upload_file missing filename");
-      }
+      if (fname && fname[0] && !enqueueJob(JOB_UPLOAD, fname))
+        publishRecordingStatus("upload_failed", fname, 0, 0, -1, "queue_full");
     } else if (strcmp(action, "delete_file") == 0) {
-      // Laravel confirms the file was stored; free SD card space
       const char *fname = doc["filename"];
-      if (fname && strlen(fname) > 0 && SD.exists(fname)) {
-        SD.remove(fname);
-        Serial.printf("Command: Deleted file %s\n", fname);
-      }
+      if (fname && fname[0])
+        enqueueJob(JOB_DELETE, fname);
+    } else if (strcmp(action, "upload_all") == 0) {
+      startUploadAll(doc["force"] | false);
+    } else if (strcmp(action, "list_files") == 0) {
+      pendingListFiles = true;
+    } else if (strcmp(action, "get_status") == 0) {
+      pendingHealth = true;
+    } else if (strcmp(action, "delete_uploaded") == 0) {
+      pendingDeleteUploaded = true;
+    } else if (strcmp(action, "set_auto_upload") == 0) {
+      autoUpload = doc["enabled"] | true;
+      saveAutoUpload(autoUpload);
+      if (autoUpload)
+        nextAutoUploadAt = millis();
+      Serial.printf("Auto upload %s\n", autoUpload ? "ON" : "OFF");
+      pendingHealth = true;
+    } else if (strcmp(action, "restart") == 0) {
+      pendingRestart = true;
     } else if (strcmp(action, "reset_wifi") == 0) {
       Serial.println("Command: Resetting WiFi (Web Trigger)");
+      stopRecordingAndWait();
       wm.resetSettings();
-      delay(1000);
+      delay(500);
       ESP.restart();
     } else if (strcmp(action, "update_wifi") == 0) {
       const char *new_ssid = doc["ssid"];
       const char *new_pass = doc["password"];
       const char *new_ip = doc["server_ip"];
-      int new_port = doc["server_port"];
+      int new_port = doc["server_port"] | 0;
 
       if (new_ssid && new_pass && new_ip && new_port) {
         Serial.printf("Command: Update. SSID:%s, Server:%s:%d\n", new_ssid,
                       new_ip, new_port);
-
-        // Save new config
-        strncpy(SERVER_IP, new_ip, sizeof(SERVER_IP));
+        strlcpy(SERVER_IP, new_ip, sizeof(SERVER_IP));
         SERVER_PORT = new_port;
         saveConfiguration(DEVICE_ID, DEVICE_TOKEN, SERVER_IP, SERVER_PORT);
 
-        // Connect to new WiFi
-        WiFi.begin(new_ssid, new_pass);
-        // WiFiManager will typically reconnect to the last used credentials on
-        // reboot or we can let wm.autoConnect handle it next time. For
-        // immediate change:
+        stopRecordingAndWait(); // tutup file WAV dengan benar
+        WiFi.begin(new_ssid, new_pass); // kredensial tersimpan oleh WiFi lib
         delay(2000);
         ESP.restart();
       }
     }
-  } else if (strstr(topic, "/control")) {
-    if (strcmp(action, "set_gain") == 0)
-      micGain = doc["value"];
+  } else if (strcmp(topic, control_topic) == 0) {
+    if (strcmp(action, "set_gain") == 0) {
+      float g = doc["value"] | 1.0f;
+      micGain = constrain(g, 0.1f, 50.0f);
+      // Simpan ke NVS setelah slider berhenti digeser (hemat flash)
+      gainDirty = true;
+      gainChangedAt = millis();
+    }
   }
 }
 
 void setupMQTT() {
   snprintf(data_topic, sizeof(data_topic), "audio/%s/data", DEVICE_ID);
   snprintf(command_topic, sizeof(command_topic), "audio/%s/command", DEVICE_ID);
-  snprintf(status_topic, sizeof(status_topic), "audio/%s/status", DEVICE_ID);
+  snprintf(control_topic, sizeof(control_topic), "audio/%s/control", DEVICE_ID);
   snprintf(recording_status_topic, sizeof(recording_status_topic),
            "audio/%s/recording_status", DEVICE_ID);
+  snprintf(health_topic, sizeof(health_topic), "audio/%s/health", DEVICE_ID);
+  snprintf(files_topic, sizeof(files_topic), "audio/%s/files", DEVICE_ID);
 
   espClient.setInsecure();
   mqttClient.setServer(mqtt_server, mqtt_port);
   mqttClient.setCallback(mqttCallback);
-  mqttClient.setBufferSize(2048);
+  mqttClient.setBufferSize(3200);
+  mqttClient.setKeepAlive(30);
+  mqttClient.setSocketTimeout(10);
 }
 
-void reconnectMQTT() {
-  if (mqttClient.connect(DEVICE_ID, mqtt_user, mqtt_pass)) {
+unsigned long lastMqttAttempt = 0;
+unsigned long lastWifiAttempt = 0;
+unsigned long lastHealthTime = 0;
+
+void maintainConnections() {
+  if (WiFi.status() != WL_CONNECTED) {
+    if (millis() - lastWifiAttempt >= WIFI_RETRY_MS) {
+      lastWifiAttempt = millis();
+      Serial.println("WiFi lost, reconnecting...");
+      WiFi.reconnect();
+    }
+    return;
+  }
+
+  if (mqttClient.connected())
+    return;
+  if (lastMqttAttempt != 0 && millis() - lastMqttAttempt < MQTT_RETRY_MS)
+    return;
+  lastMqttAttempt = millis();
+
+  // Last Will: Laravel langsung tahu device offline kalau koneksi putus
+  char will[96];
+  snprintf(will, sizeof(will), "{\"device_id\":\"%s\",\"status\":\"offline\"}",
+           DEVICE_ID);
+
+  if (mqttClient.connect(DEVICE_ID, mqtt_user, mqtt_pass, data_topic, 0, false,
+                         will)) {
     mqttClient.subscribe(command_topic);
-
-    // Subscribe to control topic for Gain Slider
-    char control_topic[50];
-    snprintf(control_topic, sizeof(control_topic), "audio/%s/control",
-             DEVICE_ID);
     mqttClient.subscribe(control_topic);
-
     Serial.println("MQTT Connected");
-    publishRecordingStatus(isRecording ? "recording" : "idle");
+
+    if (getRecState().active)
+      publishRecordingProgress();
+    else
+      publishRecordingStatus("idle");
+    pendingHealth = true;
+  } else {
+    Serial.printf("MQTT connect failed, rc=%d\n", mqttClient.state());
   }
 }
+
+// ============================================================================
+// Setup & Loop
+// ============================================================================
 
 void setup() {
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // Disable Brownout Detector
   delay(1000);                               // Wait for power to stabilize
 
   Serial.begin(115200);
-  Serial.println("\n\nNoisemon ESP32 - Recording System v2");
+  Serial.println("\n\nNoisemon ESP32 - Recording System v" FW_VERSION
+                 " (SD + Server)");
 
+  loadConfiguration();
   setupWiFi();
+  configTzTime(TZ_INFO, NTP_SERVER_1, NTP_SERVER_2);
+
+  ensureSD();
   setupI2S();
-  setupSD();
+
+  recCmdQueue = xQueueCreate(4, sizeof(RecCmd));
+  recEvtQueue = xQueueCreate(8, sizeof(RecEvt));
+  // Core 1, prioritas di atas loop() (1) supaya I2S/SD tidak pernah tertunda
+  xTaskCreatePinnedToCore(audioTask, "audio", 8192, NULL, 5, NULL, 1);
+
   setupMQTT();
+  nextAutoUploadAt = millis() + 15000; // upload sisa file setelah boot
 }
 
 void loop() {
-  if (!mqttClient.connected())
-    reconnectMQTT();
+  maintainConnections();
   mqttClient.loop();
 
-  // 1. Read I2S Data Chunk
-  size_t bytes_read;
-  i2s_read(I2S_NUM_0, &i2sBuffer, sizeof(i2sBuffer), &bytes_read,
-           portMAX_DELAY);
-  int samples_read = bytes_read / sizeof(int16_t);
+  processRecEvents();
 
-  // 2. Process Buffer (Gain + Stats)
-  double sum_sq = 0;
-  for (int i = 0; i < samples_read; i++) {
-    int16_t sample = i2sBuffer[i];
-    sample = (int16_t)(sample * micGain); // Apply Gain
-    i2sBuffer[i] = sample;                // Update buffer for recording
-
-    // FFT Data Prep
-    double norm_sample = (double)sample / REFERENCE_AMPLITUDE;
-    vReal[i] = norm_sample;
-    vImag[i] = 0;
-    sum_sq += (norm_sample * norm_sample);
+  // FFT & dB SPL tiap 1 detik
+  if (millis() - lastFFTTime >= FFT_INTERVAL_MS) {
+    lastFFTTime = millis();
+    fftFrameRequested = true;
   }
+  if (fftFrameReady)
+    publishAudioData();
 
-  // 3. Write to SD if Recording
-  if (isRecording) {
-    if (audioFile) {
-      audioFile.write((uint8_t *)i2sBuffer, bytes_read);
-      recordedSamples += samples_read;
-
-      // Auto-stop when the planned duration is reached
-      if (totalSamplesToRecord > 0 &&
-          recordedSamples >= totalSamplesToRecord) {
-        Serial.println("Planned duration reached, stopping recording.");
-        stopRecording();
-      }
-    }
-  }
-
-  // 3b. Publish recording progress every 5 seconds (realtime monitoring)
-  static unsigned long lastProgressTime = 0;
-  if (isRecording && millis() - lastProgressTime >= 5000) {
+  // Progress rekaman tiap 5 detik
+  if (getRecState().active &&
+      millis() - lastProgressTime >= PROGRESS_INTERVAL_MS) {
     lastProgressTime = millis();
     publishRecordingProgress();
   }
 
-  // 4. Calculate RMS & Send FFT (THROTTLED)
-  if (millis() - lastFFTTime >= FFT_INTERVAL) {
-    lastFFTTime = millis();
-    double rms = sqrt(sum_sq / samples_read);
-    processFFTAndPublish(rms);
+  // Perintah yang ditunda dari callback MQTT
+  if (pendingDeleteUploaded) {
+    pendingDeleteUploaded = false;
+    deleteAllUploaded();
   }
+  if (pendingListFiles) {
+    pendingListFiles = false;
+    publishFileList();
+  }
+  if (pendingRestart) {
+    Serial.println("Restart requested");
+    publishRecordingStatus("restarting");
+    stopRecordingAndWait();
+    ESP.restart();
+  }
+
+  // Health tiap 60 detik (atau segera jika diminta)
+  if (pendingHealth || millis() - lastHealthTime >= HEALTH_INTERVAL_MS) {
+    pendingHealth = false;
+    lastHealthTime = millis();
+    publishHealth();
+  }
+
+  if (gainDirty && millis() - gainChangedAt >= GAIN_SAVE_DELAY_MS) {
+    gainDirty = false;
+    saveGain(micGain);
+  }
+
+  // Upload on-demand / otomatis (blocking, tapi audioTask tetap merekam)
+  if (!isUploading)
+    uploadManager();
+
+  delay(5);
 }

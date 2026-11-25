@@ -21,6 +21,7 @@ class SettingController extends Controller
             'log_auto_archive_enabled' => Setting::get('log_auto_archive_enabled', '0'),
             'log_auto_archive_time' => Setting::get('log_auto_archive_time', '00:00'),
             'device_offline_threshold' => Setting::get('device_offline_threshold', '30'),
+            'recording_delete_after_upload' => Setting::get('recording_delete_after_upload', '0'),
         ];
 
         return view('settings', compact('settings'));
@@ -41,6 +42,7 @@ class SettingController extends Controller
             'log_auto_archive_enabled' => 'nullable|boolean',
             'log_auto_archive_time' => 'nullable|date_format:H:i',
             'device_offline_threshold' => 'nullable|integer|min:10|max:300',
+            'recording_delete_after_upload' => 'nullable|boolean',
         ]);
 
         foreach ($validated as $key => $value) {
@@ -66,6 +68,7 @@ class SettingController extends Controller
             'log_auto_archive_enabled' => (bool) Setting::get('log_auto_archive_enabled', false),
             'log_auto_archive_time' => Setting::get('log_auto_archive_time', '00:00'),
             'device_offline_threshold' => (int) Setting::get('device_offline_threshold', 30),
+            'recording_delete_after_upload' => (bool) Setting::get('recording_delete_after_upload', false),
         ]);
     }
     /**
