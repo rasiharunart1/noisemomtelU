@@ -2,7 +2,7 @@
 
 Great job berhasil mengakses SD Card! Untuk merekam audio, kita perlu menambahkan perangkat keras mikrofon dan sedikit logika perangkat lunak untuk menyimpan data suara dalam format yang bisa diputar (WAV).
 
-## 0. Arsitektur Recording: SD Card + Server (firmware v3.1)
+## 0. Arsitektur Recording: SD Card + Server (firmware v3.2)
 
 Setiap rekaman disimpan **dua kali**: di micro SD card ESP32 dan di server Laravel.
 
@@ -21,6 +21,8 @@ Poin penting:
 - **Nama file unik berbasis waktu NTP (WIB)**: `/rec/<DEVICE_ID>_<YYYYMMDD>_<HHMMSS>.wav`. Jika NTP belum sinkron, dipakai boot counter (`..._boot00012_...`), jadi file lama tidak pernah tertimpa setelah reboot.
 - **Tahan listrik mati**: header WAV di-update tiap 10 detik, sehingga file tetap bisa diputar.
 - **Auto upload + retry**: setelah rekaman selesai, file langsung di-upload. Jika server mati, dicoba ulang dengan backoff 1 menit hingga 30 menit. Saat boot, file yang belum ter-upload juga dikirim.
+- **Server upload**: default `https://dev.nhmedia.pro` (port 443 = HTTPS, port lain = HTTP). Bisa diganti dari halaman device → *WiFi & Server* (kosongkan SSID untuk mengganti server saja, tanpa restart). Device lama yang masih menyimpan `192.168.97.91` otomatis pindah ke domain saat firmware baru pertama kali boot.
+- **Upload bertahap (chunked)**: file dikirim per 8 MB karena Cloudflare menolak request di atas 100 MB. Server menyambung potongan di `storage/app/private/chunks/` lalu memindahkannya ke `recordings/` saat potongan terakhir tiba. Jika koneksi putus, upload diulang dari awal pada percobaan berikutnya.
 - **Folder di SD card**: `/rec/` berisi rekaman yang **belum** ter-upload, `/rec/up/` berisi rekaman yang **sudah** ada di server (salinan cadangan). File lama firmware v2 di root SD otomatis dipindah ke `/rec/`.
 - **SD card tidak penuh**: sebelum merekam, firmware memastikan ada ruang. Jika kurang, rekaman lama yang **sudah ter-upload** dihapus lebih dulu. Rekaman yang belum ter-upload tidak pernah dihapus otomatis; jika tetap penuh, perangkat mengirim status `sd_full`.
 - **Opsi hapus dari SD setelah upload**: Settings → *Audio Recording Storage*. Default **mati** (file disimpan di SD dan server).
@@ -38,7 +40,7 @@ Anda membutuhkan mikrofon dengan antarmuka **I2S**. Mikrofon analog biasa sulit 
 
 **Koneksi Pin (Wiring) untuk INMP441:**
 
-| INMP441 Pin | ESP32 Pin (dari `esp32_firmware_complete.ino`) | Keterangan |
+| INMP441 Pin | ESP32 Pin (dari `esp32_firmware_complete/esp32_firmware_complete.ino`) | Keterangan |
 | :--- | :--- | :--- |
 | VDD | 3.3V | Daya |
 | GND | GND | Ground |
@@ -52,7 +54,7 @@ Anda membutuhkan mikrofon dengan antarmuka **I2S**. Mikrofon analog biasa sulit 
 ## 2. Logika Perangkat Lunak (Code)
 
 Anda sebenarnya sudah memiliki kode yang sangat lengkap di folder project Anda:
-`esp32_firmware_complete.ino`
+`esp32_firmware_complete/esp32_firmware_complete.ino`
 
 Berikut adalah inti dari cara kerjanya:
 
@@ -70,7 +72,7 @@ const i2s_config_t i2s_config = {
 ### B. Format File WAV (PENTING!)
 Jika kita hanya menulis data mentah (raw data) ke SD card, file tersebut tidak akan bisa diputar oleh player biasa. Kita harus menambahkan **WAV Header** (44 bytes di awal file) yang memberi tahu player tentang format audio (sample rate, mono/stereo, bit depth).
 
-Lihat `struct WAVHeader` di dalam file `esp32_firmware_complete.ino`.
+Lihat `struct WAVHeader` di dalam file `esp32_firmware_complete/esp32_firmware_complete.ino`.
 
 ### C. Alur Perekaman
 1. Buka file di SD Card (`SD.open`).
@@ -82,7 +84,7 @@ Lihat `struct WAVHeader` di dalam file `esp32_firmware_complete.ino`.
 
 ## 3. Cara Menggunakan
 1. Pasang mikrofon INMP441 sesuai tabel wiring di atas.
-2. Buka `esp32_firmware_complete.ino` di Arduino IDE.
+2. Buka `esp32_firmware_complete/esp32_firmware_complete.ino` di Arduino IDE.
 3. Pastikan library `ArduinoJson` dan `PubSubClient` terinstall.
 4. Upload ke ESP32.
 5. Buka halaman device di web, isi durasi (menit) lalu klik **Start Recording** — atau gunakan tombol mini di dashboard.
@@ -102,6 +104,7 @@ Perintah MQTT yang didukung firmware (`audio/<DEVICE_ID>/command`). Semua tersed
 | `delete_file` | `{"filename": "/rec/XXX.wav"}` | Hapus satu file dari SD card |
 | `set_auto_upload` | `{"enabled": false}` | Matikan/nyalakan auto upload (disimpan di NVS) |
 | `restart` | — | Restart perangkat (rekaman aktif ditutup dengan benar dulu) |
+| `update_wifi` / `set_server` | `{"server_ip": "dev.nhmedia.pro", "server_port": 443, "ssid": "", "password": ""}` | Ganti server upload; jika `ssid` diisi, WiFi juga diganti dan perangkat restart |
 
 Topik yang dikirim perangkat:
 | Topik | Isi |

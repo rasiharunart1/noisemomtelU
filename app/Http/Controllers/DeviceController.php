@@ -306,19 +306,28 @@ class DeviceController extends Controller
 
     public function updateWifi(Request $request, Device $device)
     {
+        // SSID is optional: leave it empty to only change the upload server
+        // (the device then keeps its WiFi and does not restart).
         $validated = $request->validate([
-            'ssid' => 'required|string|max:32',
-            'password' => 'required|string|max:64',
-            'server_ip' => 'required|string|max:64',
+            'ssid' => 'nullable|string|max:32',
+            'password' => 'nullable|required_with:ssid|string|max:64',
+            // Domain (e.g. dev.nhmedia.pro) or IP, without http:// or a path
+            'server_ip' => ['required', 'string', 'max:63', 'regex:/^[A-Za-z0-9.\-]+$/'],
             'server_port' => 'required|integer|min:1|max:65535',
+        ], [
+            'server_ip.regex' => 'Server host must be a domain or IP only (no http:// or /path).',
         ]);
 
-        return $this->sendCommand($device, 'update_wifi', [
-            'ssid' => $validated['ssid'],
-            'password' => $validated['password'],
-            'server_ip' => $validated['server_ip'],
-            'server_port' => (int)$validated['server_port'],
-        ]);
+        $data = [
+            'server_ip' => strtolower($validated['server_ip']),
+            'server_port' => (int) $validated['server_port'],
+        ];
+        if (!empty($validated['ssid'])) {
+            $data['ssid'] = $validated['ssid'];
+            $data['password'] = $validated['password'];
+        }
+
+        return $this->sendCommand($device, 'update_wifi', $data);
     }
 
     private function sendCommand(Device $device, string $action, array $data = [])

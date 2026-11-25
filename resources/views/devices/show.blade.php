@@ -678,8 +678,8 @@
                         </svg>
                     </div>
                     <div class="text-left">
-                        <span class="block text-sm">Update WiFi</span>
-                        <span class="block text-[10px] opacity-60 font-medium italic">Configure new SSID/Pass</span>
+                        <span class="block text-sm">WiFi &amp; Server</span>
+                        <span class="block text-[10px] opacity-60 font-medium italic">Change WiFi or upload server</span>
                     </div>
                 </button>
 
@@ -733,7 +733,7 @@
                         
                         <div class="space-y-6">
                             <div class="group">
-                                <label class="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2 px-1">Network SSID</label>
+                                <label class="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2 px-1">Network SSID <span class="normal-case font-medium">(empty = keep current WiFi)</span></label>
                                 <div class="relative">
                                     <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
                                         <svg class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -771,7 +771,7 @@
 
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                                 <div class="group">
-                                    <label class="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2 px-1">Server Host IP</label>
+                                    <label class="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2 px-1">Server Host (domain or IP)</label>
                                     <div class="relative">
                                         <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
                                             <svg class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -780,7 +780,7 @@
                                         </div>
                                         <input type="text" id="server-ip" 
                                                class="w-full pl-11 pr-4 py-4 rounded-2xl border-none bg-gray-100 dark:bg-white/5 text-gray-900 dark:text-white font-bold text-sm focus:ring-2 focus:ring-blue-500 transition-all placeholder-gray-400 dark:placeholder-gray-600 shadow-inner" 
-                                               placeholder="192.168.x.x">
+                                               placeholder="dev.nhmedia.pro">
                                     </div>
                                 </div>
                                 <div class="group">
@@ -793,7 +793,7 @@
                                         </div>
                                         <input type="number" id="server-port" 
                                                class="w-full pl-11 pr-4 py-4 rounded-2xl border-none bg-gray-100 dark:bg-white/5 text-gray-900 dark:text-white font-bold text-sm focus:ring-2 focus:ring-blue-500 transition-all placeholder-gray-400 dark:placeholder-gray-600 shadow-inner" 
-                                               placeholder="8000">
+                                               placeholder="443" value="443">
                                     </div>
                                 </div>
                             </div>
@@ -1727,6 +1727,7 @@
             }
 
             setText('h-uptime', 'Up ' + fmtDuration(h.uptime));
+            if (h.server) setText('h-ip', ((h.wifi && h.wifi.ip) || '') + ' → ' + h.server.replace(/:(443|80)$/, ''));
             setText('h-system-sub', 'fw ' + (h.fw || '?') + ' · RAM ' + Math.round((h.heap_free || 0) / 1024) + ' KB · reset: ' + (h.reset_reason || '?'));
             if (['crash', 'watchdog', 'brownout'].includes(h.reset_reason)) {
                 alerts.push(badge('Last reset: ' + h.reset_reason, 'red'));
@@ -1800,29 +1801,39 @@
         }
 
         async function updateWifiCredentials() {
-             const ssid = document.getElementById('wifi-ssid').value;
+             const ssid = document.getElementById('wifi-ssid').value.trim();
              const password = document.getElementById('wifi-password').value;
-             const server_ip = document.getElementById('server-ip').value;
-             const server_port = document.getElementById('server-port').value;
-             
-             if(!ssid || !password || !server_ip || !server_port) {
-                 alert('Please fill in all fields (SSID, Password, Server IP, and Port)');
+             // Accept "https://dev.nhmedia.pro/" too: keep only the host
+             let server_ip = document.getElementById('server-ip').value.trim()
+                 .replace(/^https?:\/\//i, '').replace(/[\/:].*$/, '');
+             const server_port = document.getElementById('server-port').value || '443';
+
+             if (!server_ip) {
+                 alert('Please fill in the server host (e.g. dev.nhmedia.pro)');
+                 return;
+             }
+             if (ssid && !password) {
+                 alert('Please fill in the WiFi password, or leave SSID empty to change only the server');
                  return;
              }
 
-             if(!confirm('Device will try to connect to: ' + ssid + '\nAnd upload to: ' + server_ip + ':' + server_port + '\n\nContinue?')) return;
+             const target = (server_port === '443' ? 'https://' : 'http://') + server_ip + ':' + server_port;
+             const msg = ssid
+                 ? 'Device will connect to WiFi "' + ssid + '" and restart.\nUploads go to: ' + target
+                 : 'Only the upload server changes (no restart).\nUploads go to: ' + target;
+             if (!confirm(msg + '\n\nContinue?')) return;
 
              try {
                 const response = await fetch("{{ route('devices.wifi.update', $device) }}", {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': '{{ csrf_token() }}' },
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-CSRF-TOKEN': '{{ csrf_token() }}' },
                     body: JSON.stringify({ ssid, password, server_ip, server_port })
                 });
                 const result = await response.json();
                 if(result.success) {
-                       alert('Command sent! Device is updating WiFi...');
+                       alert(ssid ? 'Command sent! Device is updating WiFi...' : 'Command sent! Device now uploads to ' + target);
                        location.reload();
-                } else alert('Failed: ' + result.message);
+                } else alert('Failed: ' + (result.message || 'unknown error'));
             } catch (err) {
                 alert('Error sending command');
                 console.error(err);

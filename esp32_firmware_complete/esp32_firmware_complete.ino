@@ -1,5 +1,5 @@
 /**
- * Noisemon ESP32 Firmware v3.1 - SD Card + Server Recording + Real-time FFT
+ * Noisemon ESP32 Firmware v3.2 - SD Card + Server Recording + Real-time FFT
  *
  * Hardware: ESP32 + INMP441 Microphone + SD Card Module
  *
@@ -28,6 +28,11 @@
  *  - audio/<ID>/command           perintah dari Laravel (lihat mqttCallback)
  *  - audio/<ID>/control           set_gain dari slider web
  *
+ * Upload ke server:
+ *  - Default https://dev.nhmedia.pro (port 443 = HTTPS, port lain = HTTP)
+ *  - File dikirim bertahap per 8 MB (chunked) karena Cloudflare menolak
+ *    request di atas 100 MB. Server menyambung potongan menjadi satu WAV.
+ *
  * Format audio: 16-bit PCM / 16000 Hz / Mono (32 KB/detik, ~115 MB/jam)
  *
  * Library: ArduinoJson v7, PubSubClient, WiFiManager (tzapu), arduinoFFT v2
@@ -51,7 +56,7 @@
 #include "soc/rtc_cntl_reg.h" // BROWN-OUT FIX
 #include "soc/soc.h"          // BROWN-OUT FIX
 
-#define FW_VERSION "3.1.0"
+#define FW_VERSION "3.2.0"
 
 // ============================================================================
 // Configuration
@@ -68,10 +73,20 @@ const char *TZ_INFO = "WIB-7";
 const char *NTP_SERVER_1 = "pool.ntp.org";
 const char *NTP_SERVER_2 = "time.google.com";
 
-// Server Config (dimuat dari Preferences / WiFiManager)
-char SERVER_IP[64] = "192.168.97.91";
-int SERVER_PORT = 8000;
+// Server Laravel (dimuat dari Preferences / WiFiManager / MQTT set_server)
+// Boleh domain atau IP. Port 443 otomatis memakai HTTPS.
+#define DEFAULT_SERVER_HOST "dev.nhmedia.pro"
+#define DEFAULT_SERVER_PORT 443
+char SERVER_HOST[64] = DEFAULT_SERVER_HOST;
+int SERVER_PORT = DEFAULT_SERVER_PORT;
 const char *UPLOAD_PATH = "/api/upload-audio";
+// Server lama (sebelum pakai domain). Device yang masih menyimpan alamat ini
+// di NVS otomatis dipindah ke DEFAULT_SERVER_HOST saat boot.
+const char *LEGACY_SERVER_IP = "192.168.97.91";
+#define CONFIG_VERSION 2
+
+// Cloudflare menolak body > 100 MB, jadi file dikirim per potongan
+const uint32_t UPLOAD_CHUNK_BYTES = 8UL * 1024UL * 1024UL;
 
 // Device Info (dimuat dari Preferences / WiFiManager)
 char DEVICE_ID[32] = "ESP32-NOISEMON";
@@ -239,6 +254,16 @@ struct SdSummary {
   uint64_t uploadedBytes;
 };
 
+// State satu upload (bisa terdiri dari beberapa potongan / chunk)
+struct UploadCtx {
+  const char *path;
+  uint32_t fileSize;
+  uint32_t durationSec;
+  uint32_t sent; // total byte file yang sudah terkirim (untuk progress)
+  unsigned long lastService;
+  unsigned long lastReport;
+};
+
 // WAV Header (44 byte)
 struct __attribute__((packed)) WAVHeader {
   char riff[4] = {'R', 'I', 'F', 'F'};
@@ -349,6 +374,8 @@ const char *resetReasonText() {
 
 bool timeSynced() { return time(nullptr) > 1700000000; }
 
+bool serverUsesTls() { return SERVER_PORT == 443; }
+
 // ============================================================================
 // Configuration (NVS + WiFiManager)
 // ============================================================================
@@ -363,30 +390,44 @@ void loadConfiguration() {
   String savedId = preferences.getString("device_id", "ESP32-8UQ7HQ");
   String savedToken =
       preferences.getString("token", "0ymJiyM4OjSM5HV1QvZiKqPMKquAbY3n");
-  String savedIp = preferences.getString("server_ip", "192.168.97.91");
-  SERVER_PORT = preferences.getInt("server_port", 8000);
+  // Key tetap "server_ip" agar konfigurasi lama terbaca; isinya boleh domain
+  String savedHost = preferences.getString("server_ip", DEFAULT_SERVER_HOST);
+  SERVER_PORT = preferences.getInt("server_port", DEFAULT_SERVER_PORT);
   autoUpload = preferences.getBool("auto_upload", true);
   micGain = preferences.getFloat("gain", 1.0f);
   bootCount = preferences.getUInt("boot_count", 0) + 1;
   preferences.putUInt("boot_count", bootCount);
+
+  // Migrasi sekali: server lokal lama -> domain baru
+  if (preferences.getUChar("cfg_ver", 1) < CONFIG_VERSION) {
+    if (savedHost == LEGACY_SERVER_IP) {
+      savedHost = DEFAULT_SERVER_HOST;
+      SERVER_PORT = DEFAULT_SERVER_PORT;
+      preferences.putString("server_ip", savedHost);
+      preferences.putInt("server_port", SERVER_PORT);
+      Serial.println("Migrated server config to " DEFAULT_SERVER_HOST);
+    }
+    preferences.putUChar("cfg_ver", CONFIG_VERSION);
+  }
   preferences.end();
 
   strlcpy(DEVICE_ID, savedId.c_str(), sizeof(DEVICE_ID));
   strlcpy(DEVICE_TOKEN, savedToken.c_str(), sizeof(DEVICE_TOKEN));
-  strlcpy(SERVER_IP, savedIp.c_str(), sizeof(SERVER_IP));
+  strlcpy(SERVER_HOST, savedHost.c_str(), sizeof(SERVER_HOST));
 
-  Serial.printf("Loaded Config: ID=%s, Server=%s:%d, AutoUpload=%s, "
+  Serial.printf("Loaded Config: ID=%s, Server=%s://%s:%d, AutoUpload=%s, "
                 "Gain=%.1f, Boot=%u\n",
-                DEVICE_ID, SERVER_IP, SERVER_PORT, autoUpload ? "ON" : "OFF",
-                (float)micGain, bootCount);
+                DEVICE_ID, serverUsesTls() ? "https" : "http", SERVER_HOST,
+                SERVER_PORT, autoUpload ? "ON" : "OFF", (float)micGain,
+                bootCount);
 }
 
-void saveConfiguration(const char *id, const char *token, const char *ip,
+void saveConfiguration(const char *id, const char *token, const char *host,
                        int port) {
   preferences.begin("noisemon", false);
   preferences.putString("device_id", id);
   preferences.putString("token", token);
-  preferences.putString("server_ip", ip);
+  preferences.putString("server_ip", host);
   preferences.putInt("server_port", port);
   preferences.end();
   Serial.println("Config saved to NVS");
@@ -409,12 +450,12 @@ void setupWiFi() {
                                         32);
   WiFiManagerParameter custom_device_token("token", "Device Token",
                                            DEVICE_TOKEN, 64);
-  WiFiManagerParameter custom_server_ip("server_ip", "Server IP", SERVER_IP,
-                                        64);
+  WiFiManagerParameter custom_server_ip(
+      "server_ip", "Server Host (domain/IP)", SERVER_HOST, 64);
   char portStr[6];
   itoa(SERVER_PORT, portStr, 10);
-  WiFiManagerParameter custom_server_port("server_port", "Server Port", portStr,
-                                          6);
+  WiFiManagerParameter custom_server_port(
+      "server_port", "Server Port (443 = HTTPS)", portStr, 6);
 
   wm.addParameter(&custom_device_id);
   wm.addParameter(&custom_device_token);
@@ -435,9 +476,11 @@ void setupWiFi() {
   if (shouldSaveConfig) {
     strlcpy(DEVICE_ID, custom_device_id.getValue(), sizeof(DEVICE_ID));
     strlcpy(DEVICE_TOKEN, custom_device_token.getValue(), sizeof(DEVICE_TOKEN));
-    strlcpy(SERVER_IP, custom_server_ip.getValue(), sizeof(SERVER_IP));
+    strlcpy(SERVER_HOST, custom_server_ip.getValue(), sizeof(SERVER_HOST));
     SERVER_PORT = atoi(custom_server_port.getValue());
-    saveConfiguration(DEVICE_ID, DEVICE_TOKEN, SERVER_IP, SERVER_PORT);
+    if (SERVER_PORT <= 0)
+      SERVER_PORT = DEFAULT_SERVER_PORT;
+    saveConfiguration(DEVICE_ID, DEVICE_TOKEN, SERVER_HOST, SERVER_PORT);
   }
 
   WiFi.setAutoReconnect(true);
@@ -1013,6 +1056,11 @@ void publishHealth() {
   net["ip"] = WiFi.localIP().toString();
   net["ntp"] = timeSynced();
 
+  char server[96];
+  snprintf(server, sizeof(server), "%s://%s:%d",
+           serverUsesTls() ? "https" : "http", SERVER_HOST, SERVER_PORT);
+  doc["server"] = server;
+
   JsonObject sd = doc["sd"].to<JsonObject>();
   bool ok = ensureSD();
   sd["ok"] = ok;
@@ -1198,6 +1246,120 @@ void setUploadError(const char *msg) {
   strlcpy(lastUploadError, msg, sizeof(lastUploadError));
 }
 
+// Kirim satu potongan file [offset, offset+len) sebagai multipart POST.
+// Return kode HTTP, atau 0 jika gagal di jaringan (lastUploadError diisi).
+int postChunk(File &file, UploadCtx &ctx, uint32_t offset, uint32_t len,
+              uint32_t index, uint32_t total) {
+  // Objek lokal: memori TLS dilepas lagi setelah tiap potongan
+  WiFiClient plain;
+  WiFiClientSecure secure;
+  WiFiClient *client = &plain;
+  if (serverUsesTls()) {
+    secure.setInsecure(); // TODO: pasang root CA untuk validasi sertifikat
+    client = &secure;
+  }
+
+  if (!client->connect(SERVER_HOST, SERVER_PORT)) {
+    setUploadError(serverUsesTls() ? "tls_connect_failed"
+                                   : "server_unreachable");
+    return 0;
+  }
+
+  const String boundary = "----NoisemonBoundary7MA4YWxkTrZu0gW";
+  String head;
+  auto addField = [&](const char *name, const String &value) {
+    head += "--" + boundary + "\r\n";
+    head += "Content-Disposition: form-data; name=\"" + String(name) +
+            "\"\r\n\r\n" + value + "\r\n";
+  };
+  addField("device_id", DEVICE_ID);
+  addField("token", DEVICE_TOKEN);
+  addField("duration", String(ctx.durationSec));
+  // Path lengkap di SD (PHP memotong filename menjadi basename saja)
+  addField("sd_filename", ctx.path);
+  addField("total_size", String(ctx.fileSize));
+  addField("total_chunks", String(total));
+  addField("chunk_index", String(index));
+  addField("chunk_offset", String(offset));
+  head += "--" + boundary + "\r\n";
+  head += "Content-Disposition: form-data; name=\"audio\"; filename=\"" +
+          String(baseName(ctx.path)) + "\"\r\n";
+  head += "Content-Type: audio/wav\r\n\r\n";
+  String tail = "\r\n--" + boundary + "--\r\n";
+  uint32_t contentLength = head.length() + len + tail.length();
+
+  // Port standar tidak ditulis di Host (virtual host / Cloudflare)
+  String hostHeader = String(SERVER_HOST);
+  if (SERVER_PORT != 443 && SERVER_PORT != 80)
+    hostHeader += ":" + String(SERVER_PORT);
+
+  client->print(String("POST ") + UPLOAD_PATH + " HTTP/1.1\r\n");
+  client->print("Host: " + hostHeader + "\r\n");
+  client->print("User-Agent: Noisemon-ESP32/" FW_VERSION "\r\n");
+  client->print("Accept: application/json\r\n");
+  client->print("Content-Type: multipart/form-data; boundary=" + boundary +
+                "\r\n");
+  client->print("Content-Length: " + String(contentLength) + "\r\n");
+  client->print("Connection: close\r\n\r\n");
+  client->print(head);
+
+  static uint8_t buffer[4096];
+  file.seek(offset);
+  uint32_t remaining = len;
+  while (remaining > 0) {
+    size_t want = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
+    size_t got = file.read(buffer, want);
+    if (got == 0) {
+      setUploadError("sd_read_error");
+      client->stop();
+      return 0;
+    }
+    if (client->write(buffer, got) != got) {
+      setUploadError("connection_lost");
+      client->stop();
+      return 0;
+    }
+    remaining -= got;
+    ctx.sent += got;
+
+    if (millis() - ctx.lastService >= 100) {
+      ctx.lastService = millis();
+      serviceDuringUpload();
+    }
+    if (millis() - ctx.lastReport >= PROGRESS_INTERVAL_MS) {
+      ctx.lastReport = millis();
+      int pct = (int)((uint64_t)ctx.sent * 100 / ctx.fileSize);
+      publishRecordingStatus("uploading", ctx.path, ctx.durationSec,
+                             ctx.fileSize, pct);
+    }
+  }
+  client->print(tail);
+
+  // Tunggu status line: "HTTP/1.1 201 Created"
+  unsigned long start = millis();
+  while (client->connected() && !client->available() &&
+         millis() - start < HTTP_RESPONSE_TIMEOUT_MS) {
+    serviceDuringUpload();
+    delay(10);
+  }
+  if (!client->available()) {
+    client->stop();
+    setUploadError("response_timeout");
+    return 0;
+  }
+
+  String statusLine = client->readStringUntil('\n');
+  statusLine.trim();
+  client->stop();
+
+  int code = 0;
+  int sp = statusLine.indexOf(' ');
+  if (sp > 0)
+    code = statusLine.substring(sp + 1, sp + 4).toInt();
+  Serial.printf("Chunk %u/%u -> %s\n", index + 1, total, statusLine.c_str());
+  return code;
+}
+
 // path harus path yang benar-benar ada (lihat resolvePath)
 UploadResult uploadFile(const char *path) {
   if (WiFi.status() != WL_CONNECTED) {
@@ -1226,115 +1388,52 @@ UploadResult uploadFile(const char *path) {
                            lastUploadError);
     return UPLOAD_REJECTED;
   }
-  uint32_t durationSec = (fileSize - sizeof(WAVHeader)) / BYTES_PER_SECOND;
+
+  UploadCtx ctx = {};
+  ctx.path = path;
+  ctx.fileSize = fileSize;
+  ctx.durationSec = (fileSize - sizeof(WAVHeader)) / BYTES_PER_SECOND;
+  ctx.lastReport = millis();
+
+  uint32_t totalChunks = (fileSize + UPLOAD_CHUNK_BYTES - 1) / UPLOAD_CHUNK_BYTES;
 
   isUploading = true;
   strlcpy(currentUploadPath, path, sizeof(currentUploadPath));
-  publishRecordingStatus("uploading", path, durationSec, fileSize, 0);
-  Serial.printf("Uploading %s (%u bytes) to %s:%d\n", path, fileSize,
-                SERVER_IP, SERVER_PORT);
+  publishRecordingStatus("uploading", path, ctx.durationSec, fileSize, 0);
+  Serial.printf("Uploading %s (%u bytes, %u chunk(s)) to %s://%s:%d\n", path,
+                fileSize, totalChunks, serverUsesTls() ? "https" : "http",
+                SERVER_HOST, SERVER_PORT);
 
   UploadResult result = UPLOAD_RETRY;
-  WiFiClient client;
+  for (uint32_t i = 0; i < totalChunks; i++) {
+    uint32_t offset = i * UPLOAD_CHUNK_BYTES;
+    uint32_t len = fileSize - offset;
+    if (len > UPLOAD_CHUNK_BYTES)
+      len = UPLOAD_CHUNK_BYTES;
 
-  if (!client.connect(SERVER_IP, SERVER_PORT)) {
-    setUploadError("server_unreachable");
-  } else {
-    const String boundary = "----NoisemonBoundary7MA4YWxkTrZu0gW";
-    String head;
-    auto addField = [&](const char *name, const String &value) {
-      head += "--" + boundary + "\r\n";
-      head += "Content-Disposition: form-data; name=\"" + String(name) +
-              "\"\r\n\r\n" + value + "\r\n";
-    };
-    addField("device_id", DEVICE_ID);
-    addField("token", DEVICE_TOKEN);
-    addField("duration", String(durationSec));
-    // Path lengkap di SD (PHP memotong filename menjadi basename saja)
-    addField("sd_filename", path);
-    head += "--" + boundary + "\r\n";
-    head += "Content-Disposition: form-data; name=\"audio\"; filename=\"" +
-            String(baseName(path)) + "\"\r\n";
-    head += "Content-Type: audio/wav\r\n\r\n";
-    String tail = "\r\n--" + boundary + "--\r\n";
+    int code = postChunk(file, ctx, offset, len, i, totalChunks);
+    bool last = (i == totalChunks - 1);
 
-    uint32_t contentLength = head.length() + fileSize + tail.length();
-
-    client.print(String("POST ") + UPLOAD_PATH + " HTTP/1.1\r\n");
-    client.print(String("Host: ") + SERVER_IP + ":" + SERVER_PORT + "\r\n");
-    client.print("Accept: application/json\r\n");
-    client.print("Content-Type: multipart/form-data; boundary=" + boundary +
-                 "\r\n");
-    client.print("Content-Length: " + String(contentLength) + "\r\n");
-    client.print("Connection: close\r\n\r\n");
-    client.print(head);
-
-    static uint8_t buffer[4096];
-    uint32_t sent = 0;
-    bool sendOk = true;
-    unsigned long lastService = 0, lastReport = millis();
-    size_t bytesRead;
-    while ((bytesRead = file.read(buffer, sizeof(buffer))) > 0) {
-      if (client.write(buffer, bytesRead) != bytesRead) {
-        setUploadError("connection_lost");
-        sendOk = false;
-        break;
-      }
-      sent += bytesRead;
-
-      if (millis() - lastService >= 100) {
-        lastService = millis();
-        serviceDuringUpload();
-      }
-      if (millis() - lastReport >= PROGRESS_INTERVAL_MS) {
-        lastReport = millis();
-        int pct = (int)((uint64_t)sent * 100 / fileSize);
-        publishRecordingStatus("uploading", path, durationSec, fileSize, pct);
-      }
+    // Potongan tengah dijawab 200, potongan terakhir 201 (file tersimpan)
+    if (code == 200 || code == 201) {
+      if (last)
+        result = UPLOAD_OK;
+      continue;
     }
 
-    if (sendOk && sent != fileSize) {
-      setUploadError("sd_read_error");
-      sendOk = false;
+    if (code != 0) {
+      char msg[24];
+      snprintf(msg, sizeof(msg), "http_%d", code);
+      setUploadError(msg);
+      // Ditolak (validasi/token/terlalu besar): jangan diulang terus-menerus.
+      // 409 = urutan potongan tidak cocok -> ulangi dari awal nanti.
+      if (code >= 400 && code < 500 && code != 408 && code != 409 &&
+          code != 429)
+        result = UPLOAD_REJECTED;
     }
-
-    if (sendOk) {
-      client.print(tail);
-
-      // Tunggu status line: "HTTP/1.1 201 Created"
-      unsigned long start = millis();
-      while (client.connected() && !client.available() &&
-             millis() - start < HTTP_RESPONSE_TIMEOUT_MS) {
-        serviceDuringUpload();
-        delay(10);
-      }
-
-      if (client.available()) {
-        String statusLine = client.readStringUntil('\n');
-        statusLine.trim();
-        int code = 0;
-        int sp = statusLine.indexOf(' ');
-        if (sp > 0)
-          code = statusLine.substring(sp + 1, sp + 4).toInt();
-        Serial.printf("Server response: %s\n", statusLine.c_str());
-
-        if (code == 200 || code == 201) {
-          result = UPLOAD_OK;
-        } else {
-          char msg[24];
-          snprintf(msg, sizeof(msg), "http_%d", code);
-          setUploadError(msg);
-          // Ditolak (validasi/token): jangan dicoba otomatis terus-menerus
-          if (code >= 400 && code < 500 && code != 408 && code != 429)
-            result = UPLOAD_REJECTED;
-        }
-      } else {
-        setUploadError("response_timeout");
-      }
-    }
+    break;
   }
 
-  client.stop();
   file.close();
   isUploading = false;
   currentUploadPath[0] = '\0';
@@ -1343,11 +1442,11 @@ UploadResult uploadFile(const char *path) {
     lastUploadError[0] = '\0';
     // File TETAP disimpan di SD, hanya dipindah ke /rec/up
     moveToUploaded(path);
-    publishRecordingStatus("upload_completed", path, durationSec, fileSize,
+    publishRecordingStatus("upload_completed", path, ctx.durationSec, fileSize,
                            100);
   } else {
-    publishRecordingStatus("upload_failed", path, durationSec, fileSize, -1,
-                           lastUploadError);
+    publishRecordingStatus("upload_failed", path, ctx.durationSec, fileSize,
+                           -1, lastUploadError);
   }
   return result;
 }
@@ -1549,21 +1648,30 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
       wm.resetSettings();
       delay(500);
       ESP.restart();
-    } else if (strcmp(action, "update_wifi") == 0) {
+    } else if (strcmp(action, "update_wifi") == 0 ||
+               strcmp(action, "set_server") == 0) {
       const char *new_ssid = doc["ssid"];
       const char *new_pass = doc["password"];
-      const char *new_ip = doc["server_ip"];
+      const char *new_host = doc["server_ip"];
       int new_port = doc["server_port"] | 0;
 
-      if (new_ssid && new_pass && new_ip && new_port) {
-        Serial.printf("Command: Update. SSID:%s, Server:%s:%d\n", new_ssid,
-                      new_ip, new_port);
-        strlcpy(SERVER_IP, new_ip, sizeof(SERVER_IP));
+      if (new_host && new_host[0] && new_port > 0) {
+        Serial.printf("Command: server -> %s:%d\n", new_host, new_port);
+        strlcpy(SERVER_HOST, new_host, sizeof(SERVER_HOST));
         SERVER_PORT = new_port;
-        saveConfiguration(DEVICE_ID, DEVICE_TOKEN, SERVER_IP, SERVER_PORT);
+        saveConfiguration(DEVICE_ID, DEVICE_TOKEN, SERVER_HOST, SERVER_PORT);
+        // Coba upload lagi segera ke server yang baru
+        uploadBackoffMs = UPLOAD_BACKOFF_MIN_MS;
+        nextAutoUploadAt = millis();
+        rejectedCount = 0;
+        pendingHealth = true;
+      }
 
+      // WiFi hanya diganti jika SSID diisi (server saja tidak perlu restart)
+      if (new_ssid && new_ssid[0]) {
+        Serial.printf("Command: WiFi -> %s\n", new_ssid);
         stopRecordingAndWait(); // tutup file WAV dengan benar
-        WiFi.begin(new_ssid, new_pass); // kredensial tersimpan oleh WiFi lib
+        WiFi.begin(new_ssid, new_pass ? new_pass : "");
         delay(2000);
         ESP.restart();
       }

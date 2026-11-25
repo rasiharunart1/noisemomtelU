@@ -161,6 +161,32 @@ class DeviceSdSyncTest extends TestCase
             ->assertJson(['success' => true]);
     }
 
+    public function test_server_can_be_changed_without_changing_wifi(): void
+    {
+        $this->mock(DeviceCommandService::class, function ($mock) {
+            $mock->shouldReceive('send')->once()->with('ESP32-SYNC01', 'update_wifi', [
+                'server_ip' => 'dev.nhmedia.pro',
+                'server_port' => 443,
+            ]);
+        });
+
+        $this->actingAs(User::factory()->create())
+            ->postJson(route('devices.wifi.update', $this->device), [
+                'ssid' => '', 'password' => '', 'server_ip' => 'Dev.NHmedia.pro', 'server_port' => 443,
+            ])
+            ->assertOk();
+    }
+
+    public function test_server_host_rejects_urls(): void
+    {
+        $this->actingAs(User::factory()->create())
+            ->postJson(route('devices.wifi.update', $this->device), [
+                'server_ip' => 'https://dev.nhmedia.pro/api', 'server_port' => 443,
+            ])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('server_ip');
+    }
+
     public function test_command_endpoint_rejects_unknown_action(): void
     {
         $this->actingAs(User::factory()->create())

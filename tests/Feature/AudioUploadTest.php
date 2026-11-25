@@ -83,6 +83,71 @@ class AudioUploadTest extends TestCase
         $this->assertSame('completed', $recording->status);
     }
 
+    /** Split a WAV the way the firmware does and post the chunks. */
+    private function postChunk(Device $device, string $bytes, int $offset, int $index, int $total, int $totalSize)
+    {
+        return $this->post('/api/upload-audio', [
+            'device_id' => $device->device_id,
+            'token' => $device->token,
+            'duration' => 1,
+            'sd_filename' => '/rec/ESP32-TEST01_20261125_160000.wav',
+            'total_size' => $totalSize,
+            'total_chunks' => $total,
+            'chunk_index' => $index,
+            'chunk_offset' => $offset,
+            'audio' => UploadedFile::fake()->createWithContent('ESP32-TEST01_20261125_160000.wav', $bytes),
+        ], ['Accept' => 'application/json']);
+    }
+
+    public function test_chunked_upload_is_reassembled(): void
+    {
+        Storage::fake('public');
+        Storage::fake('local');
+        $device = $this->makeDevice();
+
+        $wav = $this->wav('x.wav')->getContent();
+        $parts = str_split($wav, 10000); // 4 chunks
+        $total = count($parts);
+
+        $offset = 0;
+        foreach ($parts as $i => $part) {
+            $response = $this->postChunk($device, $part, $offset, $i, $total, strlen($wav));
+            if ($i === 1) {
+                // The device retries a chunk (e.g. response lost): same offset again
+                $response = $this->postChunk($device, $part, $offset, $i, $total, strlen($wav));
+            }
+            $i < $total - 1 ? $response->assertOk() : $response->assertCreated();
+            $offset += strlen($part);
+        }
+
+        $recording = AudioRecording::firstOrFail();
+        $this->assertSame('completed', $recording->status);
+        $this->assertSame(strlen($wav), $recording->file_size_bytes);
+        $this->assertSame($wav, Storage::disk('public')->get($recording->path));
+        $this->assertEmpty(Storage::disk('local')->files('chunks/ESP32-TEST01'), 'partial file removed');
+    }
+
+    public function test_chunk_out_of_order_is_rejected_with_409(): void
+    {
+        Storage::fake('public');
+        Storage::fake('local');
+        $device = $this->makeDevice();
+        $wav = $this->wav('x.wav')->getContent();
+
+        $this->postChunk($device, substr($wav, 20000, 10000), 20000, 2, 4, strlen($wav))
+            ->assertStatus(409)
+            ->assertJson(['expected_offset' => 0]);
+        $this->assertSame(0, AudioRecording::count());
+    }
+
+    public function test_first_chunk_must_be_a_wav(): void
+    {
+        Storage::fake('local');
+        $device = $this->makeDevice();
+
+        $this->postChunk($device, str_repeat('x', 1000), 0, 0, 2, 2000)->assertStatus(422);
+    }
+
     public function test_upload_with_wrong_token_is_rejected(): void
     {
         Storage::fake('public');
