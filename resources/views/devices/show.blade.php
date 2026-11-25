@@ -693,8 +693,8 @@
                         </svg>
                     </div>
                     <div class="text-left">
-                        <span class="block text-sm">Reset to AP Mode</span>
-                        <span class="block text-[10px] font-medium opacity-80 italic">Enter Provisioning Mode</span>
+                        <span class="block text-sm">Reset WiFi</span>
+                        <span class="block text-[10px] font-medium opacity-80 italic">Back to WiFi from config.h</span>
                     </div>
                 </button>
             </div>
@@ -1782,7 +1782,11 @@
 
         // --- WiFi Management Logic ---
         async function resetWifiToAP() {
-            if (!confirm('WARNING: This will clear WiFi credentials on the device.\nThe device will restart and create a temporary "Noisemon_{{ $device->device_id }}" Hotspot.\nYou need to reconnect to it to configure new WiFi.\n\nContinue?')) return;
+            if (!confirm('The device forgets the WiFi set from this page and reconnects to the WiFi written in its firmware (config.h).
+
+Its local hotspot "Noisemon-{{ $device->device_id }}" (http://192.168.4.1) stays on, so you can always reach it nearby.
+
+Continue?')) return;
 
             try {
                 const response = await fetch("{{ route('devices.wifi.reset', $device) }}", {
@@ -1791,7 +1795,7 @@
                 });
                 const result = await response.json();
                 if(result.success) {
-                       alert('Command sent! Device is resetting to AP mode...');
+                       alert('Command sent! Device is reconnecting to its default WiFi...');
                        location.reload();
                 } else alert('Failed: ' + result.message);
             } catch (err) {

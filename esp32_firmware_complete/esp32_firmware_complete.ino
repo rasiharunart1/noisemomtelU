@@ -1,5 +1,5 @@
 /**
- * Noisemon ESP32 Firmware v3.2 - SD Card + Server Recording + Real-time FFT
+ * Noisemon ESP32 Firmware v4.0 - SD Card + Server Recording + Local Dashboard
  *
  * Hardware: ESP32 + INMP441 Microphone + SD Card Module
  *
@@ -33,9 +33,22 @@
  *  - File dikirim bertahap per 8 MB (chunked) karena Cloudflare menolak
  *    request di atas 100 MB. Server menyambung potongan menjadi satu WAV.
  *
+ * Konfigurasi & jaringan:
+ *  - Semua kredensial ada di config.h dan langsung dipakai setelah upload.
+ *  - ESP32 berjalan sebagai WiFi client (internet) DAN hotspot sekaligus.
+ *    Hotspot "Noisemon-<DEVICE_ID>" selalu aktif -> http://192.168.4.1
+ *    Dashboard lokal (web/index.html, tema sama dengan web Laravel) tetap
+ *    bisa dibuka saat internet putus: data live, rekam, file SD (putar /
+ *    unduh), status sistem, dan pengaturan.
+ *
  * Format audio: 16-bit PCM / 16000 Hz / Mono (32 KB/detik, ~115 MB/jam)
  *
- * Library: ArduinoJson v7, PubSubClient, WiFiManager (tzapu), arduinoFFT v2
+ * File sketch: esp32_firmware_complete.ino (utama), web_server.ino
+ * (dashboard lokal), config.h (kredensial), web_ui.h (halaman, dibuat oleh
+ * web/build_web_ui.py dari web/index.html).
+ *
+ * Library: ArduinoJson v7, PubSubClient, arduinoFFT v2 (tanpa WiFiManager)
+ * Partition: Default (4MB with spiffs) cukup, app memakai ~92% slot 1.25 MB
  * Board  : ESP32 Arduino core 2.x atau 3.x
  */
 
@@ -47,50 +60,52 @@
 #include <SD.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
-#include <WiFiManager.h> // https://github.com/tzapu/WiFiManager
+#include <DNSServer.h>
+#include <WebServer.h>
 #include <arduinoFFT.h>
 #include <driver/i2s.h>
 #include <esp_system.h>
+#include <sys/time.h>
 #include <time.h>
 
 #include "soc/rtc_cntl_reg.h" // BROWN-OUT FIX
 #include "soc/soc.h"          // BROWN-OUT FIX
 
-#define FW_VERSION "3.2.0"
+#if __has_include("config.h")
+#include "config.h"
+#else
+#error "config.h belum ada: salin config.example.h menjadi config.h lalu isi kredensialnya"
+#endif
+#include "web_ui.h"
+
+#define FW_VERSION "4.0.0"
 
 // ============================================================================
 // Configuration
 // ============================================================================
-
-// MQTT broker
-const char *mqtt_server = "9b7d755e8d024ad08d0c39177e53c908.s1.eu.hivemq.cloud";
-const int mqtt_port = 8883;
-const char *mqtt_user = "kalicupak";
-const char *mqtt_pass = "Kalicupak321";
 
 // Zona waktu untuk nama file rekaman (WIB = UTC+7)
 const char *TZ_INFO = "WIB-7";
 const char *NTP_SERVER_1 = "pool.ntp.org";
 const char *NTP_SERVER_2 = "time.google.com";
 
-// Server Laravel (dimuat dari Preferences / WiFiManager / MQTT set_server)
-// Boleh domain atau IP. Port 443 otomatis memakai HTTPS.
-#define DEFAULT_SERVER_HOST "dev.nhmedia.pro"
-#define DEFAULT_SERVER_PORT 443
-char SERVER_HOST[64] = DEFAULT_SERVER_HOST;
-int SERVER_PORT = DEFAULT_SERVER_PORT;
+// Nilai aktif. Awalnya dari config.h; bisa diubah dari dashboard lokal atau
+// MQTT dan disimpan di NVS (lihat loadConfiguration).
+char WIFI_SSID[33] = CFG_WIFI_SSID;
+char WIFI_PASS[65] = CFG_WIFI_PASSWORD;
+char DEVICE_ID[32] = CFG_DEVICE_ID;
+char DEVICE_TOKEN[64] = CFG_DEVICE_TOKEN;
+// Server Laravel: domain atau IP. Port 443 otomatis memakai HTTPS.
+char SERVER_HOST[64] = CFG_SERVER_HOST;
+int SERVER_PORT = CFG_SERVER_PORT;
 const char *UPLOAD_PATH = "/api/upload-audio";
-// Server lama (sebelum pakai domain). Device yang masih menyimpan alamat ini
-// di NVS otomatis dipindah ke DEFAULT_SERVER_HOST saat boot.
-const char *LEGACY_SERVER_IP = "192.168.97.91";
-#define CONFIG_VERSION 2
 
 // Cloudflare menolak body > 100 MB, jadi file dikirim per potongan
 const uint32_t UPLOAD_CHUNK_BYTES = 8UL * 1024UL * 1024UL;
 
-// Device Info (dimuat dari Preferences / WiFiManager)
-char DEVICE_ID[32] = "ESP32-NOISEMON";
-char DEVICE_TOKEN[64] = "DEFAULT_TOKEN";
+// Hotspot lokal
+const IPAddress AP_IP(192, 168, 4, 1);
+const uint8_t AP_MAX_CLIENTS = 4;
 
 // Upload otomatis ke server setelah rekaman selesai (disimpan di NVS)
 bool autoUpload = true;
@@ -132,6 +147,10 @@ const unsigned long HEALTH_INTERVAL_MS = 60000;
 const unsigned long HEADER_SYNC_MS = 10000;
 const unsigned long MQTT_RETRY_MS = 5000;
 const unsigned long WIFI_RETRY_MS = 30000;
+// Setelah 5 menit gagal, coba lebih jarang: saat mencari WiFi, ESP32
+// berpindah channel dan klien hotspot sempat terputus.
+const unsigned long WIFI_RETRY_SLOW_MS = 120000;
+const unsigned long SD_SUMMARY_TTL_MS = 15000;
 const unsigned long AUTO_UPLOAD_SCAN_MS = 30000;
 const unsigned long UPLOAD_BACKOFF_MIN_MS = 60000;
 const unsigned long UPLOAD_BACKOFF_MAX_MS = 30UL * 60UL * 1000UL;
@@ -152,9 +171,24 @@ char recording_status_topic[64];
 char health_topic[64];
 char files_topic[64];
 
-WiFiManager wm;
 Preferences preferences;
-bool shouldSaveConfig = false;
+
+// Dashboard lokal
+WebServer web(80);
+DNSServer dns;
+char apSsid[40] = "";
+bool webBusy = false;          // cegah web.handleClient() bertingkat
+bool pendingWifiReconnect = false;
+unsigned long lastWifiAttempt = 0;
+unsigned long lastWifiConnectedAt = 0;
+
+// Data live terakhir (untuk dashboard lokal, juga saat MQTT offline)
+float liveDb = 0, liveRms = 0;
+int livePeak = 0;
+long liveLow = 0, liveMid = 0, liveHigh = 0;
+uint8_t liveSpectrum[64] = {0};
+unsigned long liveAt = 0;
+volatile int uploadProgress = 0;
 
 WiFiClientSecure espClient;
 PubSubClient mqttClient(espClient);
@@ -246,13 +280,18 @@ uint16_t uploadAllFailed = 0;
 char rejectedFiles[MAX_REJECTED][MAX_PATH_LEN];
 int rejectedCount = 0;
 
-// Ringkasan isi SD card (dihitung saat health dikirim)
+// Ringkasan isi SD card (di-cache SD_SUMMARY_TTL_MS, scan folder itu mahal)
 struct SdSummary {
   uint32_t pendingFiles;
   uint64_t pendingBytes;
   uint32_t uploadedFiles;
   uint64_t uploadedBytes;
+  uint32_t totalMb;
+  uint32_t freeMb;
 };
+SdSummary sdCache = {};
+unsigned long sdCacheAt = 0;
+bool sdCacheValid = false;
 
 // State satu upload (bisa terdiri dari beberapa potongan / chunk)
 struct UploadCtx {
@@ -281,6 +320,11 @@ struct __attribute__((packed)) WAVHeader {
   uint32_t dataSize = 0;
 };
 static_assert(sizeof(WAVHeader) == 44, "WAV header must be 44 bytes");
+
+// loop() menjalankan upload TLS + web server + MQTT secara bertingkat;
+// stack default 8 KB terlalu mepet. (Makro ini mendefinisikan fungsi, jadi
+// harus berada SETELAH semua deklarasi tipe.)
+SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 
 // ============================================================================
 // Helpers
@@ -377,60 +421,108 @@ bool timeSynced() { return time(nullptr) > 1700000000; }
 bool serverUsesTls() { return SERVER_PORT == 443; }
 
 // ============================================================================
-// Configuration (NVS + WiFiManager)
+// Configuration: config.h + perubahan dari dashboard lokal / MQTT (NVS)
 // ============================================================================
 
-void saveConfigCallback() {
-  Serial.println("Should save config");
-  shouldSaveConfig = true;
+// Key NVS yang menimpa nilai config.h
+const char *OVERRIDE_KEYS[] = {"wifi_ssid", "wifi_pass", "device_id",
+                               "token",     "server_ip", "server_port"};
+
+uint32_t fnv1a(uint32_t h, const char *str) {
+  while (*str) {
+    h ^= (uint8_t)*str++;
+    h *= 16777619u;
+  }
+  h ^= 0xff; // pemisah antar field
+  return h * 16777619u;
+}
+
+// Sidik jari nilai di config.h. Jika berubah (firmware baru di-upload dengan
+// config.h yang diedit), nilai config.h kembali dipakai.
+uint32_t codeConfigHash() {
+  char port[8];
+  snprintf(port, sizeof(port), "%d", CFG_SERVER_PORT);
+  uint32_t h = 2166136261u;
+  h = fnv1a(h, CFG_WIFI_SSID);
+  h = fnv1a(h, CFG_WIFI_PASSWORD);
+  h = fnv1a(h, CFG_DEVICE_ID);
+  h = fnv1a(h, CFG_DEVICE_TOKEN);
+  h = fnv1a(h, CFG_SERVER_HOST);
+  return fnv1a(h, port);
+}
+
+// getString() mencetak error di log jika key tidak ada, jadi cek dulu
+void loadOverride(const char *key, char *dest, size_t len) {
+  if (preferences.isKey(key))
+    strlcpy(dest, preferences.getString(key, dest).c_str(), len);
 }
 
 void loadConfiguration() {
   preferences.begin("noisemon", false);
-  String savedId = preferences.getString("device_id", "ESP32-8UQ7HQ");
-  String savedToken =
-      preferences.getString("token", "0ymJiyM4OjSM5HV1QvZiKqPMKquAbY3n");
-  // Key tetap "server_ip" agar konfigurasi lama terbaca; isinya boleh domain
-  String savedHost = preferences.getString("server_ip", DEFAULT_SERVER_HOST);
-  SERVER_PORT = preferences.getInt("server_port", DEFAULT_SERVER_PORT);
-  autoUpload = preferences.getBool("auto_upload", true);
-  micGain = preferences.getFloat("gain", 1.0f);
-  bootCount = preferences.getUInt("boot_count", 0) + 1;
-  preferences.putUInt("boot_count", bootCount);
 
-  // Migrasi sekali: server lokal lama -> domain baru
-  if (preferences.getUChar("cfg_ver", 1) < CONFIG_VERSION) {
-    if (savedHost == LEGACY_SERVER_IP) {
-      savedHost = DEFAULT_SERVER_HOST;
-      SERVER_PORT = DEFAULT_SERVER_PORT;
-      preferences.putString("server_ip", savedHost);
-      preferences.putInt("server_port", SERVER_PORT);
-      Serial.println("Migrated server config to " DEFAULT_SERVER_HOST);
-    }
-    preferences.putUChar("cfg_ver", CONFIG_VERSION);
+  uint32_t hash = codeConfigHash();
+  if (preferences.getUInt("cfg_hash", 0) != hash) {
+    for (const char *k : OVERRIDE_KEYS)
+      if (preferences.isKey(k))
+        preferences.remove(k);
+    preferences.putUInt("cfg_hash", hash);
+    Serial.println("config.h changed: using its values");
   }
+
+  loadOverride("wifi_ssid", WIFI_SSID, sizeof(WIFI_SSID));
+  loadOverride("wifi_pass", WIFI_PASS, sizeof(WIFI_PASS));
+  loadOverride("device_id", DEVICE_ID, sizeof(DEVICE_ID));
+  loadOverride("token", DEVICE_TOKEN, sizeof(DEVICE_TOKEN));
+  loadOverride("server_ip", SERVER_HOST, sizeof(SERVER_HOST));
+  if (preferences.isKey("server_port"))
+    SERVER_PORT = preferences.getInt("server_port", CFG_SERVER_PORT);
+
+  autoUpload = preferences.isKey("auto_upload")
+                   ? preferences.getBool("auto_upload", true)
+                   : true;
+  micGain = preferences.isKey("gain") ? preferences.getFloat("gain", 1.0f)
+                                      : 1.0f;
+  bootCount = (preferences.isKey("boot_count")
+                   ? preferences.getUInt("boot_count", 0)
+                   : 0) +
+              1;
+  preferences.putUInt("boot_count", bootCount);
   preferences.end();
 
-  strlcpy(DEVICE_ID, savedId.c_str(), sizeof(DEVICE_ID));
-  strlcpy(DEVICE_TOKEN, savedToken.c_str(), sizeof(DEVICE_TOKEN));
-  strlcpy(SERVER_HOST, savedHost.c_str(), sizeof(SERVER_HOST));
-
-  Serial.printf("Loaded Config: ID=%s, Server=%s://%s:%d, AutoUpload=%s, "
+  Serial.printf("Config: ID=%s, WiFi=%s, Server=%s://%s:%d, AutoUpload=%s, "
                 "Gain=%.1f, Boot=%u\n",
-                DEVICE_ID, serverUsesTls() ? "https" : "http", SERVER_HOST,
-                SERVER_PORT, autoUpload ? "ON" : "OFF", (float)micGain,
-                bootCount);
+                DEVICE_ID, WIFI_SSID, serverUsesTls() ? "https" : "http",
+                SERVER_HOST, SERVER_PORT, autoUpload ? "ON" : "OFF",
+                (float)micGain, bootCount);
 }
 
-void saveConfiguration(const char *id, const char *token, const char *host,
-                       int port) {
+void saveOverride(const char *key, const char *value) {
   preferences.begin("noisemon", false);
-  preferences.putString("device_id", id);
-  preferences.putString("token", token);
-  preferences.putString("server_ip", host);
+  preferences.putString(key, value);
+  preferences.end();
+}
+
+void saveOverridePort(int port) {
+  preferences.begin("noisemon", false);
   preferences.putInt("server_port", port);
   preferences.end();
-  Serial.println("Config saved to NVS");
+}
+
+void resetOverrides() {
+  preferences.begin("noisemon", false);
+  for (const char *k : OVERRIDE_KEYS)
+    if (preferences.isKey(k))
+      preferences.remove(k);
+  preferences.end();
+}
+
+// Nama setting yang saat ini berbeda dari config.h (untuk dashboard)
+void listOverrides(JsonArray arr) {
+  preferences.begin("noisemon", true);
+  for (const char *k : OVERRIDE_KEYS)
+    if (preferences.isKey(k))
+      arr.add(k);
+  preferences.end();
 }
 
 void saveAutoUpload(bool enabled) {
@@ -445,47 +537,47 @@ void saveGain(float gain) {
   preferences.end();
 }
 
+void applyServer(const char *host, int port) {
+  strlcpy(SERVER_HOST, host, sizeof(SERVER_HOST));
+  SERVER_PORT = port;
+  saveOverride("server_ip", SERVER_HOST);
+  saveOverridePort(SERVER_PORT);
+  // Coba upload lagi segera ke server yang baru
+  uploadBackoffMs = UPLOAD_BACKOFF_MIN_MS;
+  nextAutoUploadAt = millis();
+  rejectedCount = 0;
+  pendingHealth = true;
+}
+
+// Sambung (ulang) ke WiFi tujuan. Hotspot tetap menyala.
+void connectStation() {
+  lastWifiAttempt = millis();
+  if (!WIFI_SSID[0]) {
+    Serial.println("No WiFi SSID configured: hotspot only");
+    return;
+  }
+  Serial.printf("Connecting to WiFi \"%s\"...\n", WIFI_SSID);
+  WiFi.disconnect();
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+}
+
 void setupWiFi() {
-  WiFiManagerParameter custom_device_id("device_id", "Device ID", DEVICE_ID,
-                                        32);
-  WiFiManagerParameter custom_device_token("token", "Device Token",
-                                           DEVICE_TOKEN, 64);
-  WiFiManagerParameter custom_server_ip(
-      "server_ip", "Server Host (domain/IP)", SERVER_HOST, 64);
-  char portStr[6];
-  itoa(SERVER_PORT, portStr, 10);
-  WiFiManagerParameter custom_server_port(
-      "server_port", "Server Port (443 = HTTPS)", portStr, 6);
+  // Kredensial dikelola sendiri (config.h + NVS), jangan disimpan SDK
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_AP_STA);
+  // Reconnect diatur maintainConnections() dengan jeda, supaya pencarian
+  // WiFi tidak terus-menerus memutus klien hotspot
+  WiFi.setAutoReconnect(false);
 
-  wm.addParameter(&custom_device_id);
-  wm.addParameter(&custom_device_token);
-  wm.addParameter(&custom_server_ip);
-  wm.addParameter(&custom_server_port);
-  wm.setSaveConfigCallback(saveConfigCallback);
-  wm.setConnectTimeout(20);
-  // Jangan terjebak selamanya di portal konfigurasi
-  wm.setConfigPortalTimeout(180);
+  snprintf(apSsid, sizeof(apSsid), "Noisemon-%s", DEVICE_ID);
+  const char *apPass = strlen(CFG_AP_PASSWORD) >= 8 ? CFG_AP_PASSWORD : nullptr;
+  WiFi.softAPConfig(AP_IP, AP_IP, IPAddress(255, 255, 255, 0));
+  bool apOk = WiFi.softAP(apSsid, apPass, 1, 0, AP_MAX_CLIENTS);
+  Serial.printf("Hotspot %s: \"%s\" password \"%s\" -> http://%s (login %s)\n",
+                apOk ? "ON" : "FAILED", apSsid, apPass ? apPass : "(open)",
+                AP_IP.toString().c_str(), CFG_WEB_USER);
 
-  String apName = "Noisemon_" + String(DEVICE_ID);
-  if (!wm.autoConnect(apName.c_str())) {
-    Serial.println("WiFi failed to connect and hit timeout, restarting");
-    delay(3000);
-    ESP.restart();
-  }
-
-  if (shouldSaveConfig) {
-    strlcpy(DEVICE_ID, custom_device_id.getValue(), sizeof(DEVICE_ID));
-    strlcpy(DEVICE_TOKEN, custom_device_token.getValue(), sizeof(DEVICE_TOKEN));
-    strlcpy(SERVER_HOST, custom_server_ip.getValue(), sizeof(SERVER_HOST));
-    SERVER_PORT = atoi(custom_server_port.getValue());
-    if (SERVER_PORT <= 0)
-      SERVER_PORT = DEFAULT_SERVER_PORT;
-    saveConfiguration(DEVICE_ID, DEVICE_TOKEN, SERVER_HOST, SERVER_PORT);
-  }
-
-  WiFi.setAutoReconnect(true);
-  Serial.print("WiFi connected! IP: ");
-  Serial.println(WiFi.localIP());
+  connectStation();
 }
 
 // ============================================================================
@@ -837,6 +929,17 @@ void publishAudioData() {
       high += spectrum[i];
   }
 
+  // Simpan untuk dashboard lokal (tetap tersedia saat MQTT offline)
+  liveDb = dbSPL;
+  liveRms = rms;
+  livePeak = (int)peak_freq;
+  liveLow = low;
+  liveMid = mid;
+  liveHigh = high;
+  for (int i = 0; i < 64; i++)
+    liveSpectrum[i] = (uint8_t)spectrum[i];
+  liveAt = millis();
+
   JsonDocument doc;
   doc["device_id"] = DEVICE_ID;
   doc["token"] = DEVICE_TOKEN;
@@ -913,11 +1016,22 @@ void countWav(const char *dirPath, uint32_t &count, uint64_t &bytes) {
   dir.close();
 }
 
-SdSummary summarizeSd() {
-  SdSummary s = {};
-  countWav(REC_DIR, s.pendingFiles, s.pendingBytes);
-  countWav(UP_DIR, s.uploadedFiles, s.uploadedBytes);
-  return s;
+void invalidateSdSummary() { sdCacheValid = false; }
+
+SdSummary getSdSummary(bool force = false) {
+  if (!sdReady)
+    return SdSummary{};
+  if (force || !sdCacheValid || millis() - sdCacheAt > SD_SUMMARY_TTL_MS) {
+    SdSummary s = {};
+    countWav(REC_DIR, s.pendingFiles, s.pendingBytes);
+    countWav(UP_DIR, s.uploadedFiles, s.uploadedBytes);
+    s.totalMb = (uint32_t)(SD.totalBytes() / (1024 * 1024));
+    s.freeMb = (uint32_t)(sdFreeBytes() / (1024 * 1024));
+    sdCache = s;
+    sdCacheAt = millis();
+    sdCacheValid = true;
+  }
+  return sdCache;
 }
 
 // Laravel menyimpan path saat rekaman selesai (/rec/x.wav). Setelah upload
@@ -948,11 +1062,13 @@ void moveToUploaded(const char *path) {
     SD.remove(dest);
   if (!SD.rename(path, dest))
     Serial.printf("Failed to move %s to %s\n", path, dest);
+  invalidateSdSummary();
 }
 
 bool deleteRecordingFile(const char *path) {
   if (isBusyFile(path))
     return false;
+  invalidateSdSummary();
   return SD.remove(path);
 }
 
@@ -1065,9 +1181,9 @@ void publishHealth() {
   bool ok = ensureSD();
   sd["ok"] = ok;
   if (ok) {
-    SdSummary s = summarizeSd();
-    sd["total_mb"] = (uint32_t)(SD.totalBytes() / (1024 * 1024));
-    sd["free_mb"] = (uint32_t)(sdFreeBytes() / (1024 * 1024));
+    SdSummary s = getSdSummary();
+    sd["total_mb"] = s.totalMb;
+    sd["free_mb"] = s.freeMb;
     sd["pending_files"] = s.pendingFiles;
     sd["pending_mb"] = (uint32_t)(s.pendingBytes / (1024 * 1024));
     sd["uploaded_files"] = s.uploadedFiles;
@@ -1129,15 +1245,15 @@ void makeRecordingFilename(char *out, size_t len) {
     snprintf(out, len, "%s_%d.wav", base, i);
 }
 
-void requestStartRecording(uint32_t durationSeconds) {
+bool requestStartRecording(uint32_t durationSeconds) {
   if (getRecState().active) {
     Serial.println("Already recording, start ignored");
     publishRecordingProgress();
-    return;
+    return false;
   }
   if (!ensureSD()) {
     publishRecordingStatus("sd_error");
-    return;
+    return false;
   }
 
   if (durationSeconds > MAX_RECORDING_SECONDS)
@@ -1151,7 +1267,7 @@ void requestStartRecording(uint32_t durationSeconds) {
     if (sdFreeBytes() < SD_RESERVE_BYTES) {
       Serial.println("SD card full (no uploaded files left to delete)");
       publishRecordingStatus("sd_full");
-      return;
+      return false;
     }
     Serial.println("Warning: SD may fill up before recording ends");
   }
@@ -1160,7 +1276,7 @@ void requestStartRecording(uint32_t durationSeconds) {
   cmd.type = REC_CMD_START;
   cmd.durationSeconds = durationSeconds;
   makeRecordingFilename(cmd.filename, sizeof(cmd.filename));
-  xQueueSend(recCmdQueue, &cmd, pdMS_TO_TICKS(100));
+  return xQueueSend(recCmdQueue, &cmd, pdMS_TO_TICKS(100)) == pdTRUE;
 }
 
 void requestStopRecording() {
@@ -1187,6 +1303,7 @@ void processRecEvents() {
       publishRecordingStatus("sd_error", evt.filename);
       break;
     case REC_EVT_COMPLETED:
+      invalidateSdSummary();
       Serial.printf("Recording finished: %s (%u s, %u bytes)%s\n",
                     evt.filename, durationSec, sizeBytes,
                     evt.writeError ? " [SD write error]" : "");
@@ -1223,8 +1340,9 @@ void stopRecordingAndWait() {
 unsigned long lastFFTTime = 0;
 unsigned long lastProgressTime = 0;
 
-// Dipanggil berkala selama upload supaya MQTT & FFT tetap jalan
-void serviceDuringUpload() {
+// MQTT, FFT dan progress tetap jalan selama operasi panjang (upload,
+// unduhan file dari dashboard). Tidak memanggil web server.
+void serviceBackground() {
   mqttClient.loop();
   processRecEvents();
 
@@ -1240,6 +1358,12 @@ void serviceDuringUpload() {
     lastProgressTime = millis();
     publishRecordingProgress();
   }
+}
+
+// Selama upload: juga layani dashboard lokal supaya tetap responsif
+void serviceDuringUpload() {
+  serviceBackground();
+  serviceWeb();
 }
 
 void setUploadError(const char *msg) {
@@ -1321,6 +1445,7 @@ int postChunk(File &file, UploadCtx &ctx, uint32_t offset, uint32_t len,
     }
     remaining -= got;
     ctx.sent += got;
+    uploadProgress = (int)((uint64_t)ctx.sent * 100 / ctx.fileSize);
 
     if (millis() - ctx.lastService >= 100) {
       ctx.lastService = millis();
@@ -1398,6 +1523,7 @@ UploadResult uploadFile(const char *path) {
   uint32_t totalChunks = (fileSize + UPLOAD_CHUNK_BYTES - 1) / UPLOAD_CHUNK_BYTES;
 
   isUploading = true;
+  uploadProgress = 0;
   strlcpy(currentUploadPath, path, sizeof(currentUploadPath));
   publishRecordingStatus("uploading", path, ctx.durationSec, fileSize, 0);
   Serial.printf("Uploading %s (%u bytes, %u chunk(s)) to %s://%s:%d\n", path,
@@ -1493,7 +1619,7 @@ void startUploadAll(bool force) {
   doc["status"] = "upload_all_started";
   doc["device_id"] = DEVICE_ID;
   doc["force"] = force;
-  SdSummary s = summarizeSd();
+  SdSummary s = getSdSummary(true);
   doc["files"] = s.pendingFiles;
   doc["mb"] = (uint32_t)(s.pendingBytes / (1024 * 1024));
   publishJson(recording_status_topic, doc);
@@ -1643,11 +1769,15 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
     } else if (strcmp(action, "restart") == 0) {
       pendingRestart = true;
     } else if (strcmp(action, "reset_wifi") == 0) {
-      Serial.println("Command: Resetting WiFi (Web Trigger)");
-      stopRecordingAndWait();
-      wm.resetSettings();
-      delay(500);
-      ESP.restart();
+      // Kembali ke WiFi dari config.h (hotspot lokal tetap aktif)
+      Serial.println("Command: WiFi back to config.h values");
+      preferences.begin("noisemon", false);
+      preferences.remove("wifi_ssid");
+      preferences.remove("wifi_pass");
+      preferences.end();
+      strlcpy(WIFI_SSID, CFG_WIFI_SSID, sizeof(WIFI_SSID));
+      strlcpy(WIFI_PASS, CFG_WIFI_PASSWORD, sizeof(WIFI_PASS));
+      pendingWifiReconnect = true;
     } else if (strcmp(action, "update_wifi") == 0 ||
                strcmp(action, "set_server") == 0) {
       const char *new_ssid = doc["ssid"];
@@ -1657,23 +1787,17 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
 
       if (new_host && new_host[0] && new_port > 0) {
         Serial.printf("Command: server -> %s:%d\n", new_host, new_port);
-        strlcpy(SERVER_HOST, new_host, sizeof(SERVER_HOST));
-        SERVER_PORT = new_port;
-        saveConfiguration(DEVICE_ID, DEVICE_TOKEN, SERVER_HOST, SERVER_PORT);
-        // Coba upload lagi segera ke server yang baru
-        uploadBackoffMs = UPLOAD_BACKOFF_MIN_MS;
-        nextAutoUploadAt = millis();
-        rejectedCount = 0;
-        pendingHealth = true;
+        applyServer(new_host, new_port);
       }
 
-      // WiFi hanya diganti jika SSID diisi (server saja tidak perlu restart)
+      // WiFi hanya diganti jika SSID diisi; tidak perlu restart
       if (new_ssid && new_ssid[0]) {
         Serial.printf("Command: WiFi -> %s\n", new_ssid);
-        stopRecordingAndWait(); // tutup file WAV dengan benar
-        WiFi.begin(new_ssid, new_pass ? new_pass : "");
-        delay(2000);
-        ESP.restart();
+        strlcpy(WIFI_SSID, new_ssid, sizeof(WIFI_SSID));
+        strlcpy(WIFI_PASS, new_pass ? new_pass : "", sizeof(WIFI_PASS));
+        saveOverride("wifi_ssid", WIFI_SSID);
+        saveOverride("wifi_pass", WIFI_PASS);
+        pendingWifiReconnect = true;
       }
     }
   } else if (strcmp(topic, control_topic) == 0) {
@@ -1697,7 +1821,7 @@ void setupMQTT() {
   snprintf(files_topic, sizeof(files_topic), "audio/%s/files", DEVICE_ID);
 
   espClient.setInsecure();
-  mqttClient.setServer(mqtt_server, mqtt_port);
+  mqttClient.setServer(CFG_MQTT_HOST, CFG_MQTT_PORT);
   mqttClient.setCallback(mqttCallback);
   mqttClient.setBufferSize(3200);
   mqttClient.setKeepAlive(30);
@@ -1705,18 +1829,26 @@ void setupMQTT() {
 }
 
 unsigned long lastMqttAttempt = 0;
-unsigned long lastWifiAttempt = 0;
 unsigned long lastHealthTime = 0;
 
 void maintainConnections() {
+  if (pendingWifiReconnect) {
+    pendingWifiReconnect = false;
+    mqttClient.disconnect();
+    connectStation();
+    return;
+  }
+
   if (WiFi.status() != WL_CONNECTED) {
-    if (millis() - lastWifiAttempt >= WIFI_RETRY_MS) {
-      lastWifiAttempt = millis();
-      Serial.println("WiFi lost, reconnecting...");
-      WiFi.reconnect();
+    bool longDown = millis() - lastWifiConnectedAt > 300000UL;
+    unsigned long wait = longDown ? WIFI_RETRY_SLOW_MS : WIFI_RETRY_MS;
+    if (WIFI_SSID[0] && millis() - lastWifiAttempt >= wait) {
+      Serial.println("WiFi not connected, retrying...");
+      connectStation();
     }
     return;
   }
+  lastWifiConnectedAt = millis();
 
   if (mqttClient.connected())
     return;
@@ -1729,7 +1861,7 @@ void maintainConnections() {
   snprintf(will, sizeof(will), "{\"device_id\":\"%s\",\"status\":\"offline\"}",
            DEVICE_ID);
 
-  if (mqttClient.connect(DEVICE_ID, mqtt_user, mqtt_pass, data_topic, 0, false,
+  if (mqttClient.connect(DEVICE_ID, CFG_MQTT_USER, CFG_MQTT_PASSWORD, data_topic, 0, false,
                          will)) {
     mqttClient.subscribe(command_topic);
     mqttClient.subscribe(control_topic);
@@ -1755,7 +1887,7 @@ void setup() {
 
   Serial.begin(115200);
   Serial.println("\n\nNoisemon ESP32 - Recording System v" FW_VERSION
-                 " (SD + Server)");
+                 " (SD + Server + Local Dashboard)");
 
   loadConfiguration();
   setupWiFi();
@@ -1770,10 +1902,13 @@ void setup() {
   xTaskCreatePinnedToCore(audioTask, "audio", 8192, NULL, 5, NULL, 1);
 
   setupMQTT();
+  setupWeb();
   nextAutoUploadAt = millis() + 15000; // upload sisa file setelah boot
+  Serial.printf("Free heap after setup: %u bytes\n", ESP.getFreeHeap());
 }
 
 void loop() {
+  serviceWeb(); // dashboard lokal + DNS hotspot
   maintainConnections();
   mqttClient.loop();
 

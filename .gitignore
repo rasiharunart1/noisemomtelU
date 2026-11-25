@@ -22,3 +22,6 @@
 Homestead.json
 Homestead.yaml
 Thumbs.db
+
+# ESP32 credentials (copy esp32_firmware_complete/config.example.h)
+esp32_firmware_complete/config.h

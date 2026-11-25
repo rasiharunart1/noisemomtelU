@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#E31E24">
+<link rel="icon" href="data:,">
+<title>Noisemon Local</title>
+<style>
+:root{--bg:linear-gradient(135deg,#fef2f2 0%,#fee2e2 100%);--card:rgba(255,255,255,.55);--border:rgba(255,255,255,.6);--text:#111827;--muted:#6b7280;--soft:rgba(17,24,39,.05);--line:rgba(17,24,39,.08);--red:#E31E24;--red2:#8B0000;--green:#10b981;--amber:#f59e0b;--blue:#2563eb;--indigo:#6366f1;--gray:#9ca3af}
+.dark{--bg:linear-gradient(135deg,#1a1a1a 0%,#0a0a0a 100%);--card:rgba(17,24,39,.6);--border:rgba(255,255,255,.1);--text:#f9fafb;--muted:#9ca3af;--soft:rgba(255,255,255,.05);--line:rgba(255,255,255,.08)}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);background-attachment:fixed;color:var(--text);min-height:100vh;padding-bottom:84px;-webkit-font-smoothing:antialiased}
+button,input,select{font:inherit;color:inherit}
+.wrap{max-width:1100px;margin:0 auto;padding:16px}
+.glass{background:var(--card);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:1px solid var(--border);border-radius:16px;box-shadow:0 20px 25px -5px rgba(0,0,0,.08),0 8px 10px -6px rgba(0,0,0,.06)}
+.dark .glass{box-shadow:0 25px 50px -12px rgba(0,0,0,.5)}
+header.glass{display:flex;align-items:center;gap:12px;padding:12px 16px;position:sticky;top:12px;z-index:10;margin-bottom:16px}
+.logo{width:40px;height:40px;border-radius:10px;background:linear-gradient(135deg,var(--red),var(--red2));display:flex;align-items:center;justify-content:center;box-shadow:0 10px 15px -3px rgba(227,30,36,.5);flex-shrink:0}
+.logo svg{width:22px;height:22px;color:#fff}
+.brand{font-weight:800;background:linear-gradient(90deg,#ef4444,#b91c1c);-webkit-background-clip:text;background-clip:text;color:transparent;line-height:1.1}
+.sub{font-size:11px;color:var(--muted)}
+.grow{flex:1;min-width:0}
+.pills{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.pill{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;padding:4px 9px;border-radius:999px;background:var(--soft);color:var(--muted);white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--gray)}
+.on .dot{background:var(--green);box-shadow:0 0 0 3px rgba(16,185,129,.2)}
+.warn .dot{background:var(--amber)}
+.bad .dot{background:var(--red)}
+.rec .dot{background:var(--red);animation:pr 1.4s infinite}
+@keyframes pr{0%{box-shadow:0 0 0 0 rgba(227,30,36,.7)}70%{box-shadow:0 0 0 8px rgba(227,30,36,0)}100%{box-shadow:0 0 0 0 rgba(227,30,36,0)}}
+.iconbtn{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;background:var(--soft);border:1px solid var(--border);cursor:pointer;flex-shrink:0}
+.iconbtn svg{width:18px;height:18px}
+nav{display:flex;gap:6px;margin-bottom:16px;overflow-x:auto}
+nav button{border:0;background:transparent;padding:9px 14px;border-radius:10px;font-weight:600;font-size:14px;color:var(--muted);cursor:pointer;display:flex;align-items:center;gap:6px;white-space:nowrap}
+nav button svg{width:18px;height:18px}
+nav button.act{background:linear-gradient(90deg,#dc2626,#b91c1c);color:#fff;box-shadow:0 10px 15px -3px rgba(227,30,36,.35)}
+@media(max-width:720px){nav{position:fixed;bottom:10px;left:10px;right:10px;z-index:20;justify-content:space-around;padding:6px;margin:0;background:var(--card);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:1px solid var(--border);border-radius:16px}nav button{flex-direction:column;gap:2px;font-size:10px;padding:6px 8px}header.glass{flex-wrap:wrap}header .pills{order:3;width:100%;justify-content:flex-start}}
+.tab{display:none}.tab.act{display:block}
+.grid{display:grid;gap:16px}
+.g4{grid-template-columns:repeat(4,1fr)}.g2{grid-template-columns:repeat(2,1fr)}.g3{grid-template-columns:repeat(3,1fr)}
+@media(max-width:900px){.g4{grid-template-columns:repeat(2,1fr)}.g3{grid-template-columns:1fr}}
+@media(max-width:600px){.g2{grid-template-columns:1fr}}
+.card{padding:20px}
+.mb{margin-bottom:16px}
+h3{font-size:16px;font-weight:700;display:flex;align-items:center;gap:8px;margin-bottom:14px}
+h3 .b{width:8px;height:8px;border-radius:50%;background:var(--red)}
+.metric{padding:16px;border-radius:16px}
+.metric .k{font-size:10px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-bottom:4px}
+.metric .v{font-size:28px;font-weight:900;line-height:1.1}
+.metric .u{font-size:12px;font-weight:700;color:var(--muted);margin-left:3px}
+.metric.red{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.2)}
+.metric.red .k{color:#dc2626}
+.dark .metric.red{background:rgba(239,68,68,.18)}
+.metric.plain{background:var(--soft);border:1px solid var(--line)}
+canvas{width:100%;display:block}#cHist{height:200px}#cSpec{height:160px}
+.btn{border:0;cursor:pointer;padding:10px 16px;border-radius:10px;font-weight:600;font-size:14px;display:inline-flex;align-items:center;justify-content:center;gap:6px;transition:transform .2s,box-shadow .2s}
+.btn:hover:not(:disabled){transform:scale(1.03)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn svg{width:16px;height:16px}
+a.btn{color:inherit;text-decoration:none}
+.pri{background:linear-gradient(90deg,#dc2626,#b91c1c);color:#fff;box-shadow:0 10px 15px -3px rgba(227,30,36,.35)}
+.grn{background:linear-gradient(90deg,#10b981,#059669);color:#fff;box-shadow:0 10px 15px -3px rgba(16,185,129,.3)}
+.sec{background:var(--soft);border:1px solid var(--line)}
+.blu{background:rgba(37,99,235,.12);color:#2563eb}
+.amb{background:rgba(245,158,11,.14);color:#b45309}
+.dark .amb{color:#fbbf24}.dark .blu{color:#60a5fa}
+.sm{padding:6px 10px;font-size:12px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.row>.btn.f{flex:1}
+label{display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
+input[type=text],input[type=password],input[type=number]{width:100%;padding:11px 14px;border-radius:12px;border:1px solid var(--line);background:var(--soft);outline:none}
+input:focus{border-color:var(--red);box-shadow:0 0 0 3px rgba(227,30,36,.15)}
+input[type=range]{width:100%;accent-color:var(--red)}
+.field{margin-bottom:14px}
+.hint{font-size:11px;color:var(--muted);margin-top:4px}
+.bar{height:10px;border-radius:999px;background:var(--line);overflow:hidden;display:flex}
+.bar>div{height:100%;transition:width .6s}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--muted);margin-top:8px}
+.legend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:10px 8px;border-bottom:1px solid var(--line)}
+td{padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
+td.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;word-break:break-all}
+.tag{display:inline-block;font-size:10px;font-weight:700;padding:3px 8px;border-radius:999px}
+.t-up{background:rgba(16,185,129,.14);color:#059669}
+.t-pend{background:rgba(245,158,11,.15);color:#b45309}
+.t-rec{background:rgba(239,68,68,.14);color:#dc2626}
+.dark .t-up{color:#34d399}.dark .t-pend{color:#fbbf24}.dark .t-rec{color:#f87171}
+.acts{display:flex;gap:4px;justify-content:flex-end}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:8px 16px;font-size:13px}
+.kv dt{color:var(--muted)}.kv dd{font-weight:600;text-align:right;word-break:break-all}
+.banner{display:none;padding:10px 14px;border-radius:12px;margin-bottom:16px;font-size:13px;font-weight:600;background:rgba(239,68,68,.12);color:#dc2626;border:1px solid rgba(239,68,68,.25)}
+.banner.show{display:block}
+.prog{height:8px;border-radius:999px;background:var(--line);overflow:hidden;margin-top:6px}
+.prog>div{height:100%;background:linear-gradient(90deg,#ef4444,#dc2626);transition:width 1s}
+.bands{display:flex;align-items:flex-end;gap:6px;height:56px}
+.bands div{flex:1;border-radius:6px 6px 0 0;position:relative;height:100%}
+.bands span{position:absolute;bottom:0;left:0;right:0;border-radius:6px 6px 0 0;transition:height .3s}
+#toast{position:fixed;left:50%;bottom:96px;transform:translateX(-50%);padding:10px 16px;border-radius:12px;background:#111827;color:#fff;font-size:13px;font-weight:600;opacity:0;transition:opacity .3s;pointer-events:none;z-index:50;max-width:90vw}
+#toast.show{opacity:1}
+.switch{position:relative;width:44px;height:24px;flex-shrink:0}
+.switch input{opacity:0;width:0;height:0}
+.switch span{position:absolute;inset:0;border-radius:999px;background:var(--line);cursor:pointer;transition:.2s}
+.switch span:before{content:"";position:absolute;width:18px;height:18px;left:3px;top:3px;border-radius:50%;background:#fff;transition:.2s}
+.switch input:checked+span{background:var(--red)}
+.switch input:checked+span:before{transform:translateX(20px)}
+audio{width:100%;margin-bottom:12px}
+.empty{text-align:center;color:var(--muted);padding:24px;font-style:italic}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="glass">
+ <div class="logo"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"/></svg></div>
+ <div class="grow"><div class="brand">NOISEMON</div><div class="sub"><span id="hId">-</span> &middot; local dashboard</div></div>
+ <div class="pills">
+  <span class="pill" id="pWifi"><i class="dot"></i>WiFi</span>
+  <span class="pill" id="pMqtt"><i class="dot"></i>Cloud</span>
+  <span class="pill" id="pSd"><i class="dot"></i>SD</span>
+  <span class="pill" id="pRec"><i class="dot"></i>Idle</span>
+ </div>
+ <button class="iconbtn" id="themeBtn" title="Dark mode"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg></button>
+</header>
+
+<nav>
+ <button data-tab="live" class="act"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>Live</button>
+ <button data-tab="rec"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>Record</button>
+ <button data-tab="sd"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M7 3h7l5 5v11a2 2 0 01-2 2H7a2 2 0 01-2-2V5a2 2 0 012-2zM9 7v3m3-3v3m3-2v2"/></svg>SD Card</button>
+ <button data-tab="sys"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z"/></svg>System</button>
+ <button data-tab="set"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><circle cx="12" cy="12" r="3"/></svg>Settings</button>
+</nav>
+
+<div class="banner" id="offline">Lost connection to the device. Retrying&hellip;</div>
+
+<!-- LIVE -->
+<section class="tab act" id="t-live">
+ <div class="grid g4 mb">
+  <div class="metric red glass"><div class="k">Noise Level</div><span class="v" id="mDb">-</span><span class="u">dB</span></div>
+  <div class="metric plain"><div class="k">Peak Freq</div><span class="v" id="mPeak">-</span><span class="u">Hz</span></div>
+  <div class="metric plain"><div class="k">RMS</div><span class="v" id="mRms">-</span></div>
+  <div class="metric plain"><div class="k">Digital Gain</div><span class="v" id="mGain" style="color:var(--red)">-</span><span class="u">x</span></div>
+ </div>
+ <div class="glass card mb"><h3><span class="b"></span>Noise Level (dB SPL) &mdash; last 2 minutes</h3><canvas id="cHist" height="200"></canvas></div>
+ <div class="grid g3">
+  <div class="glass card" style="grid-column:span 2"><h3><span class="b" style="background:var(--indigo)"></span>Live Spectrum (0&ndash;8 kHz)</h3><canvas id="cSpec" height="160"></canvas></div>
+  <div class="glass card"><h3><span class="b" style="background:var(--amber)"></span>Band Distribution</h3>
+   <div class="bands"><div style="background:rgba(139,0,0,.15)"><span id="bLow" style="background:#8B0000"></span></div><div style="background:rgba(227,30,36,.15)"><span id="bMid" style="background:#E31E24"></span></div><div style="background:rgba(239,68,68,.15)"><span id="bHigh" style="background:#f87171"></span></div></div>
+   <div class="legend" style="justify-content:space-around"><span>Low</span><span>Mid</span><span>High</span></div>
+  </div>
+ </div>
+</section>
+
+<!-- RECORD -->
+<section class="tab" id="t-rec">
+ <div class="glass card mb">
+  <h3><span class="b"></span>Recording Control <span class="grow"></span><span class="pill" id="recState"><i class="dot"></i>Idle</span></h3>
+  <div class="grid g2 mb">
+   <div><label for="dur">Duration (minutes, 0 = until stopped)</label><input type="number" id="dur" min="0" max="240" value="30"></div>
+   <div><label>Estimated size</label><div class="metric plain" style="padding:11px 14px;border-radius:12px"><span id="est" style="font-weight:700">-</span></div></div>
+  </div>
+  <div class="row"><button class="btn grn f" id="btnStart">Start Recording</button><button class="btn pri f" id="btnStop" disabled>Stop Recording</button></div>
+  <div id="recProg" style="display:none;margin-top:16px"><div class="row sub" style="justify-content:space-between"><span id="recFile">-</span><span id="recTime">-</span></div><div class="prog"><div id="recBar" style="width:0"></div></div></div>
+  <p class="hint" style="margin-top:12px">Recordings are saved on the SD card and uploaded to the server automatically when the internet is available.</p>
+ </div>
+ <div class="glass card"><h3><span class="b" style="background:var(--blue)"></span>Upload to Server</h3>
+  <dl class="kv"><dt>Status</dt><dd id="upState">-</dd><dt>Server</dt><dd id="upServer">-</dd><dt>Last error</dt><dd id="upErr">-</dd></dl>
+  <div class="prog" id="upProgWrap" style="display:none"><div id="upBar" style="width:0;background:linear-gradient(90deg,#3b82f6,#2563eb)"></div></div>
+ </div>
+</section>
+
+<!-- SD CARD -->
+<section class="tab" id="t-sd">
+ <div class="glass card mb">
+  <h3><span class="b" style="background:var(--indigo)"></span>SD Card <span class="grow"></span><span class="sub" id="sdUse">-</span></h3>
+  <div class="bar"><div id="sdP" style="background:var(--amber);width:0"></div><div id="sdU" style="background:var(--green);width:0"></div><div id="sdO" style="background:var(--gray);width:0"></div></div>
+  <div class="legend"><span><i style="background:var(--amber)"></i>Not uploaded: <b id="sdPn">-</b></span><span><i style="background:var(--green)"></i>On server (backup): <b id="sdUn">-</b></span><span><i style="background:var(--gray)"></i>Other</span></div>
+  <div class="row" style="margin-top:16px">
+   <button class="btn blu sm" data-cmd="upload_all">Upload All Pending</button>
+   <button class="btn blu sm" data-cmd="upload_all" data-force="1" data-confirm="Re-upload every recording on the SD card?">Re-upload Everything</button>
+   <button class="btn amb sm" data-cmd="delete_uploaded" data-confirm="Delete all recordings that are already on the server from the SD card?">Free SD Space</button>
+   <button class="btn sec sm" id="btnRefresh">Refresh List</button>
+  </div>
+ </div>
+ <div class="glass card">
+  <h3><span class="b"></span>Recordings on SD <span class="grow"></span><span class="sub" id="fCount">-</span></h3>
+  <audio id="player" controls style="display:none"></audio>
+  <div style="overflow-x:auto"><table><thead><tr><th>File</th><th style="text-align:right">Size</th><th>Status</th><th style="text-align:right">Actions</th></tr></thead><tbody id="files"><tr><td colspan="4" class="empty">Loading&hellip;</td></tr></tbody></table></div>
+ </div>
+</section>
+
+<!-- SYSTEM -->
+<section class="tab" id="t-sys">
+ <div class="grid g2">
+  <div class="glass card"><h3><span class="b" style="background:var(--blue)"></span>Network</h3><dl class="kv" id="kvNet"></dl></div>
+  <div class="glass card"><h3><span class="b" style="background:var(--indigo)"></span>Device</h3><dl class="kv" id="kvDev"></dl></div>
+  <div class="glass card"><h3><span class="b" style="background:var(--amber)"></span>SD Card Health</h3><dl class="kv" id="kvSd"></dl></div>
+  <div class="glass card"><h3><span class="b"></span>Actions</h3>
+   <div class="row"><button class="btn sec" data-cmd="restart" data-confirm="Restart the device? An active recording is closed first.">Restart Device</button></div>
+   <p class="hint" style="margin-top:10px">The hotspot stays on all the time, so this page keeps working without internet.</p>
+  </div>
+ </div>
+</section>
+
+<!-- SETTINGS -->
+<section class="tab" id="t-set">
+ <form id="cfgForm">
+ <div class="grid g2">
+  <div class="glass card"><h3><span class="b" style="background:var(--blue)"></span>WiFi (internet)</h3>
+   <div class="field"><label for="wifi_ssid">SSID</label><input type="text" id="wifi_ssid" name="wifi_ssid" maxlength="32"></div>
+   <div class="field"><label for="wifi_pass">Password</label><input type="password" id="wifi_pass" name="wifi_pass" maxlength="64" placeholder="unchanged"><div class="hint">Leave empty to keep the current password.</div></div>
+  </div>
+  <div class="glass card"><h3><span class="b"></span>Upload Server</h3>
+   <div class="field"><label for="server_host">Host (domain or IP)</label><input type="text" id="server_host" name="server_host" maxlength="63"></div>
+   <div class="field"><label for="server_port">Port (443 = HTTPS)</label><input type="number" id="server_port" name="server_port" min="1" max="65535"></div>
+  </div>
+  <div class="glass card"><h3><span class="b" style="background:var(--indigo)"></span>Device Identity</h3>
+   <div class="field"><label for="device_id">Device ID</label><input type="text" id="device_id" name="device_id" maxlength="31"><div class="hint">Changing the ID restarts the device.</div></div>
+   <div class="field"><label for="token">Device Token</label><input type="password" id="token" name="token" maxlength="63" placeholder="unchanged"><div class="hint" id="tokHint"></div></div>
+  </div>
+  <div class="glass card"><h3><span class="b" style="background:var(--green)"></span>Audio &amp; Upload</h3>
+   <div class="field"><label for="gain">Digital Gain: <span id="gainVal">-</span>x</label><input type="range" id="gain" name="gain" min="1" max="25" step="0.5"></div>
+   <div class="field row" style="justify-content:space-between"><div><b style="font-size:14px">Auto upload</b><div class="hint">Upload each recording right after it finishes.</div></div><label class="switch" style="margin:0"><input type="checkbox" id="auto_upload" name="auto_upload"><span></span></label></div>
+  </div>
+ </div>
+ <div class="glass card" style="margin-top:16px"><div class="row"><button type="submit" class="btn pri f">Save Settings</button><button type="button" class="btn sec" id="btnReset">Reset to firmware defaults</button></div>
+  <p class="hint" style="margin-top:10px">Values set in <b>config.h</b> are used again after the firmware is uploaded with a changed config.h. <span id="ovr"></span></p></div>
+ </form>
+</section>
+</div>
+<div id="toast"></div>
+
+<script>
+const $=id=>document.getElementById(id);
+const fmtMb=mb=>mb==null?'-':(mb>=1024?(mb/1024).toFixed(1)+' GB':mb+' MB');
+const fmtSize=b=>b>=1048576?(b/1048576).toFixed(1)+' MB':(b/1024).toFixed(0)+' KB';
+const fmtDur=s=>{if(s==null)return'-';s=Math.floor(s);const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;return(h?h+':'+String(m).padStart(2,'0'):m)+':'+String(x).padStart(2,'0')};
+const fmtUp=s=>{const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return(d?d+'d ':'')+(h||d?h+'h ':'')+m+'m'};
+function toast(t){const e=$('toast');e.textContent=t;e.classList.add('show');clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove('show'),3000)}
+async function post(url,data){const r=await fetch(url,{method:'POST',body:new URLSearchParams(data||{})});const j=await r.json().catch(()=>({ok:false,msg:'Bad response'}));if(!r.ok||!j.ok)throw new Error(j.msg||('HTTP '+r.status));return j}
+async function cmd(action,extra){try{const j=await post('/api/cmd',Object.assign({action},extra||{}));toast(j.msg||'Done');return j}catch(e){toast('Failed: '+e.message)}}
+
+// theme (same key as the main web)
+const root=document.documentElement;
+if(localStorage.getItem('darkMode')==='true'||(localStorage.getItem('darkMode')===null&&matchMedia('(prefers-color-scheme: dark)').matches))root.classList.add('dark');
+$('themeBtn').onclick=()=>{root.classList.toggle('dark');localStorage.setItem('darkMode',root.classList.contains('dark'));drawAll()};
+
+// tabs
+let tab='live';
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{tab=b.dataset.tab;document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('act',x===b));document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('act',t.id==='t-'+tab));if(tab==='sd')loadFiles();if(tab==='set')loadConfig();drawAll()});
+
+// charts (plain canvas, no external libraries)
+const hist=[];let spec=[];
+function prep(c){const r=window.devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;if(c.width!==Math.round(w*r)||c.height!==Math.round(h*r)){c.width=Math.round(w*r);c.height=Math.round(h*r)}const x=c.getContext('2d');x.setTransform(r,0,0,r,0,0);return{x,w,h}}
+function css(v){return getComputedStyle(root).getPropertyValue(v).trim()}
+function drawHist(){const c=$('cHist');if(!c.clientWidth)return;const{x,w,h}=prep(c),pad=28,lo=30,hi=110;x.clearRect(0,0,w,h);x.strokeStyle=css('--line');x.fillStyle=css('--muted');x.font='10px sans-serif';x.lineWidth=1;
+ for(let v=lo;v<=hi;v+=20){const y=h-pad/2-(v-lo)/(hi-lo)*(h-pad);x.beginPath();x.moveTo(pad,y);x.lineTo(w,y);x.stroke();x.fillText(v,2,y+3)}
+ if(hist.length<2)return;const n=120,sx=(w-pad)/(n-1),pts=hist.map((v,i)=>[pad+(n-hist.length+i)*sx,h-pad/2-(Math.min(hi,Math.max(lo,v))-lo)/(hi-lo)*(h-pad)]);
+ const g=x.createLinearGradient(0,0,0,h);g.addColorStop(0,'rgba(239,68,68,.35)');g.addColorStop(1,'rgba(239,68,68,0)');
+ x.beginPath();x.moveTo(pts[0][0],h-pad/2);pts.forEach(p=>x.lineTo(p[0],p[1]));x.lineTo(pts[pts.length-1][0],h-pad/2);x.fillStyle=g;x.fill();
+ x.beginPath();pts.forEach((p,i)=>i?x.lineTo(p[0],p[1]):x.moveTo(p[0],p[1]));x.strokeStyle='#ef4444';x.lineWidth=2.5;x.lineJoin='round';x.stroke()}
+function drawSpec(){const c=$('cSpec');if(!c.clientWidth)return;const{x,w,h}=prep(c);x.clearRect(0,0,w,h);if(!spec.length)return;const bw=w/spec.length,g=x.createLinearGradient(0,h,0,0);g.addColorStop(0,'#7c3aed');g.addColorStop(1,'#ef4444');x.fillStyle=g;
+ spec.forEach((v,i)=>{const bh=Math.max(1,v/100*h);x.beginPath();x.roundRect?x.roundRect(i*bw+1,h-bh,bw-2,bh,[2,2,0,0]):x.rect(i*bw+1,h-bh,bw-2,bh);x.fill()})}
+function drawAll(){if(tab==='live'){drawHist();drawSpec()}}
+addEventListener('resize',drawAll);
+
+function pill(id,cls,text){const e=$(id);e.className='pill '+cls;e.lastChild.textContent=text}
+function kv(id,rows){$(id).innerHTML=rows.map(r=>'<dt>'+r[0]+'</dt><dd>'+r[1]+'</dd>').join('')}
+const esc=s=>String(s==null?'-':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+let st=null,timeSent=false,lastRecActive=null;
+function render(s){
+ st=s;$('hId').textContent=s.id;document.title='Noisemon '+s.id;
+ pill('pWifi',s.wifi.connected?'on':'bad',s.wifi.connected?'WiFi '+s.wifi.rssi+' dBm':'WiFi offline');
+ pill('pMqtt',s.mqtt?'on':'warn',s.mqtt?'Cloud':'Cloud offline');
+ pill('pSd',s.sd.ok?(s.sd.free_mb/s.sd.total_mb<.05?'warn':'on'):'bad',s.sd.ok?'SD '+fmtMb(s.sd.free_mb)+' free':'SD error');
+ pill('pRec',s.rec.active?'rec':(s.up.active?'warn':''),s.rec.active?'Recording':(s.up.active?'Uploading':'Idle'));
+ // live
+ const L=s.live;$('mDb').textContent=L.db?L.db.toFixed(1):'-';$('mPeak').textContent=L.peak;$('mRms').textContent=L.rms.toFixed(4);$('mGain').textContent=s.gain.toFixed(1);
+ if(L.age<3000){hist.push(L.db);if(hist.length>120)hist.shift();spec=L.spec}
+ const tot=(L.low+L.mid+L.high)||1;$('bLow').style.height=L.low/tot*100+'%';$('bMid').style.height=L.mid/tot*100+'%';$('bHigh').style.height=L.high/tot*100+'%';
+ drawAll();
+ // recording
+ const R=s.rec;pill('recState',R.active?'rec':'',R.active?'Recording':'Idle');$('btnStart').disabled=R.active||!s.sd.ok;$('btnStop').disabled=!R.active;$('recProg').style.display=R.active?'block':'none';
+ if(R.active){$('recFile').textContent=R.file.split('/').pop();$('recTime').textContent=fmtDur(R.elapsed)+' / '+(R.duration?fmtDur(R.duration):'manual');$('recBar').style.width=(R.duration?Math.min(100,R.elapsed/R.duration*100):100)+'%'}
+ if(lastRecActive!==null&&lastRecActive!==R.active&&tab==='sd')loadFiles();lastRecActive=R.active;
+ // upload
+ const U=s.up;$('upState').textContent=U.active?'Uploading '+U.file.split('/').pop()+' ('+U.progress+'%)':(s.sd.pending?s.sd.pending+' waiting'+(U.retry_s?' · retry in '+fmtUp(U.retry_s):(s.auto_upload?'':' · auto upload off')):'All uploaded');
+ $('upServer').textContent=s.server;$('upErr').textContent=U.error||'-';$('upProgWrap').style.display=U.active?'block':'none';$('upBar').style.width=U.progress+'%';
+ // sd
+ const D=s.sd;if(D.ok&&D.total_mb){const used=D.total_mb-D.free_mb,p=v=>Math.max(0,Math.min(100,v/D.total_mb*100))+'%';$('sdUse').textContent=fmtMb(used)+' used of '+fmtMb(D.total_mb);$('sdP').style.width=p(D.pending_mb);$('sdU').style.width=p(D.uploaded_mb);$('sdO').style.width=p(Math.max(0,used-D.pending_mb-D.uploaded_mb))}
+ $('sdPn').textContent=D.pending+' ('+fmtMb(D.pending_mb)+')';$('sdUn').textContent=D.uploaded+' ('+fmtMb(D.uploaded_mb)+')';
+ // system
+ kv('kvNet',[['WiFi network',esc(s.wifi.ssid||'not set')],['WiFi status',s.wifi.connected?'Connected':'Not connected'],['Signal',s.wifi.connected?s.wifi.rssi+' dBm':'-'],['IP on WiFi',esc(s.wifi.ip)],['Hotspot',esc(s.ap.ssid)],['Hotspot IP',esc(s.ap.ip)],['Hotspot clients',s.ap.clients],['Cloud (MQTT)',s.mqtt?'Connected':'Offline'],['Upload server',esc(s.server)]]);
+ kv('kvDev',[['Device ID',esc(s.id)],['Firmware',esc(s.fw)],['Uptime',fmtUp(s.uptime)],['Clock',s.time?new Date(s.time*1000).toLocaleString():'-'],['Clock source',s.time_ok?'NTP / browser':'not set'],['Free RAM',Math.round(s.heap/1024)+' KB (min '+Math.round(s.heap_min/1024)+' KB)'],['Last reset',esc(s.reset)],['Boot count',s.boot]]);
+ kv('kvSd',[['Status',D.ok?'OK':'Not detected'],['Free',fmtMb(D.free_mb)+' of '+fmtMb(D.total_mb)],['Slowest write',D.max_write+' ms'],['Slow writes (>300 ms)',D.slow],['Write errors',D.errors]]);
+ // give the device the correct time when it has no internet
+ if(!s.time_ok&&!timeSent){timeSent=true;post('/api/cmd',{action:'time',epoch:Math.floor(Date.now()/1000)}).then(()=>toast('Device clock set from this browser')).catch(()=>{})}
+}
+
+let failCount=0;
+async function poll(){if(document.hidden){setTimeout(poll,2000);return}
+ try{const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw 0;render(await r.json());failCount=0;$('offline').classList.remove('show')}catch(e){if(++failCount>2)$('offline').classList.add('show')}
+ setTimeout(poll,1000)}
+poll();
+
+// recording
+function est(){const m=parseFloat($('dur').value)||0;$('est').textContent=m>0?'~'+(m*60*32000/1048576).toFixed(1)+' MB WAV':'Manual stop (max 4 h)'}
+$('dur').oninput=est;est();
+$('btnStart').onclick=()=>cmd('start',{duration:Math.round((parseFloat($('dur').value)||0)*60)});
+$('btnStop').onclick=()=>cmd('stop');
+
+// generic command buttons
+document.querySelectorAll('[data-cmd]').forEach(b=>b.onclick=async()=>{if(b.dataset.confirm&&!confirm(b.dataset.confirm))return;b.disabled=true;await cmd(b.dataset.cmd,b.dataset.force?{force:1}:{});b.disabled=false;if(tab==='sd')setTimeout(loadFiles,1500)});
+
+// SD files
+$('btnRefresh').onclick=loadFiles;
+async function loadFiles(){try{const r=await fetch('/api/files',{cache:'no-store'});const j=await r.json();const f=j.files.sort((a,b)=>b.n.split('/').pop()<a.n.split('/').pop()?-1:1);$('fCount').textContent=f.length+' file(s)';
+ $('files').innerHTML=f.length?f.map(x=>{const name=x.n.split('/').pop(),q=encodeURIComponent(x.n),tag=x.r?'<span class="tag t-rec">Recording</span>':(x.u?'<span class="tag t-up">On server</span>':'<span class="tag t-pend">Not uploaded</span>');
+  return '<tr><td class="mono">'+esc(name)+'<div class="sub">'+fmtDur(Math.max(0,(x.s-44)/32000))+'</div></td><td style="text-align:right;white-space:nowrap">'+fmtSize(x.s)+'</td><td>'+tag+'</td><td><div class="acts">'+
+  (x.r?'':'<button class="btn sec sm" title="Play" onclick="play(\''+q+'\')">&#9654;</button><a class="btn sec sm" title="Download" href="/sd/file?dl=1&path='+q+'">&#8595;</a><button class="btn blu sm" title="Upload now" onclick="act(\'upload\',\''+q+'\')">&#8593;</button><button class="btn amb sm" title="Delete" onclick="act(\'delete\',\''+q+'\',\''+esc(name)+'\')">&#10005;</button>')+'</div></td></tr>'}).join(''):'<tr><td colspan="4" class="empty">No recordings on the SD card</td></tr>'}catch(e){$('files').innerHTML='<tr><td colspan="4" class="empty">Could not read the SD card</td></tr>'}}
+function play(q){const p=$('player');p.style.display='block';p.src='/sd/file?path='+q;p.play().catch(()=>{})}
+async function act(a,q,name){const path=decodeURIComponent(q);if(a==='delete'&&!confirm('Delete '+name+' from the SD card?'))return;await cmd(a,{path});setTimeout(loadFiles,1200)}
+
+// settings
+async function loadConfig(){try{const c=await (await fetch('/api/config',{cache:'no-store'})).json();['wifi_ssid','server_host','server_port','device_id'].forEach(k=>$(k).value=c[k]);$('gain').value=c.gain;$('gainVal').textContent=(+c.gain).toFixed(1);$('auto_upload').checked=c.auto_upload;$('wifi_pass').value='';$('token').value='';
+ $('tokHint').textContent=c.token_hint?'Current token ends with '+c.token_hint:'No token set';$('ovr').textContent=c.overrides.length?'Changed on this device: '+c.overrides.join(', ')+'.':'All values come from config.h.'}catch(e){toast('Could not load settings')}}
+$('gain').oninput=e=>$('gainVal').textContent=(+e.target.value).toFixed(1);
+$('cfgForm').onsubmit=async e=>{e.preventDefault();const d=Object.fromEntries(new FormData(e.target));d.auto_upload=$('auto_upload').checked?1:0;try{const j=await post('/api/config',d);toast(j.msg||'Saved');loadConfig()}catch(err){toast('Failed: '+err.message)}};
+$('btnReset').onclick=async()=>{if(!confirm('Discard settings changed on this device and use the values from config.h?'))return;await cmd('reset_config');loadConfig()};
+</script>
+</body>
+</html>
