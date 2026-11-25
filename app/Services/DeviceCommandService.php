@@ -39,7 +39,10 @@ class DeviceCommandService
             'device_id' => $deviceId,
         ], $data));
 
-        $mqtt->publish("audio/{$deviceId}/command", $payload, 0);
+        // QoS 1: broker menyimpan perintah untuk device yang MQTT-nya sedang dijeda (upload)
+        $mqtt->publish("audio/{$deviceId}/command", $payload, 1);
+        // Tunggu PUBACK dari broker (maks 5 detik) sebelum memutus koneksi
+        $mqtt->loop(true, true, 5);
         $mqtt->disconnect();
     }
 

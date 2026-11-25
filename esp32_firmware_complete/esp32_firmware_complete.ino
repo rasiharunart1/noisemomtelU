@@ -78,7 +78,7 @@
 #endif
 #include "web_ui.h"
 
-#define FW_VERSION "4.0.2"
+#define FW_VERSION "4.0.3"
 
 // ============================================================================
 // Configuration
@@ -100,8 +100,12 @@ char SERVER_HOST[64] = CFG_SERVER_HOST;
 int SERVER_PORT = CFG_SERVER_PORT;
 const char *UPLOAD_PATH = "/api/upload-audio";
 
-// Cloudflare menolak body > 100 MB, jadi file dikirim per potongan
-const uint32_t UPLOAD_CHUNK_BYTES = 8UL * 1024UL * 1024UL;
+// File dikirim per potongan 1 MB: tiap request selesai jauh di bawah batas
+// 100 detik Cloudflare (error 524), dan kalau gagal hanya potongan itu yang
+// diulang (lanjut dari potongan terakhir yang sudah diterima server).
+const uint32_t UPLOAD_CHUNK_BYTES = 1UL * 1024UL * 1024UL;
+// Perintah MQTT yang tertahan di broker lebih lama dari ini diabaikan
+const uint32_t STALE_COMMAND_S = 300;
 
 // Hotspot lokal
 const IPAddress AP_IP(192, 168, 4, 1);
@@ -265,7 +269,9 @@ bool pendingDeleteUploaded = false;
 bool pendingRestart = false;
 
 // --- Upload state ---
-enum UploadResult { UPLOAD_OK, UPLOAD_RETRY, UPLOAD_REJECTED };
+// UPLOAD_DEFERRED: ditunda karena sedang merekam dan RAM tidak cukup untuk
+// HTTPS tanpa memutus MQTT (data realtime rekaman diprioritaskan).
+enum UploadResult { UPLOAD_OK, UPLOAD_RETRY, UPLOAD_REJECTED, UPLOAD_DEFERRED };
 bool isUploading = false;
 char currentUploadPath[MAX_PATH_LEN] = "";
 unsigned long nextAutoUploadAt = 0;
@@ -274,6 +280,9 @@ char lastUploadError[48] = "";
 // MQTT diputus sementara selama upload karena RAM tidak cukup untuk dua sesi
 // TLS sekaligus; loop() menyambungkannya lagi setelah upload selesai.
 bool mqttPausedForUpload = false;
+// Upload yang terputus dilanjutkan dari offset terakhir yang diterima server
+char resumePath[MAX_PATH_LEN] = "";
+uint32_t resumeOffset = 0;
 // upload_all: upload semua file yang belum ter-upload sekarang juga
 bool uploadAllActive = false;
 uint16_t uploadAllOk = 0;
@@ -568,6 +577,9 @@ void setupWiFi() {
   // Kredensial dikelola sendiri (config.h + NVS), jangan disimpan SDK
   WiFi.persistent(false);
   WiFi.mode(WIFI_AP_STA);
+  // Modem sleep membuat upload TCP sangat lambat (ACK tertahan sampai beacon
+  // berikutnya, ~7 KB/s). Perangkat ini bertenaga adaptor, jadi matikan.
+  WiFi.setSleep(false);
   // Reconnect diatur maintainConnections() dengan jeda, supaya pencarian
   // WiFi tidak terus-menerus memutus klien hotspot
   WiFi.setAutoReconnect(false);
@@ -1404,8 +1416,13 @@ int postChunk(File &file, UploadCtx &ctx, uint32_t offset, uint32_t len,
   if (serverUsesTls()) {
     secure.setInsecure(); // TODO: pasang root CA untuk validasi sertifikat
     client = &secure;
-    if (ESP.getMaxAllocHeap() < TLS_MIN_FREE_BLOCK)
+    if (ESP.getMaxAllocHeap() < TLS_MIN_FREE_BLOCK) {
+      if (getRecState().active && mqttClient.connected()) {
+        setUploadError("deferred_recording");
+        return -1;
+      }
       pauseMqttForUpload();
+    }
   }
 
   bool connected = client->connect(SERVER_HOST, SERVER_PORT);
@@ -1421,7 +1438,7 @@ int postChunk(File &file, UploadCtx &ctx, uint32_t offset, uint32_t len,
 
     // Tanpa PSRAM, sesi TLS MQTT + sesi TLS upload sering tidak muat di RAM.
     // Lepas sesi MQTT selama upload, lalu coba sekali lagi.
-    if (mqttClient.connected()) {
+    if (mqttClient.connected() && !getRecState().active) {
       pauseMqttForUpload();
       secure.stop();
       delay(100);
@@ -1431,6 +1448,10 @@ int postChunk(File &file, UploadCtx &ctx, uint32_t offset, uint32_t len,
         Serial.printf("TLS retry failed: %d %s (free heap %u, largest block %u)\n",
                       code, err, ESP.getFreeHeap(), ESP.getMaxAllocHeap());
       }
+    }
+    if (!connected && getRecState().active && mqttClient.connected()) {
+      setUploadError("deferred_recording");
+      return -1;
     }
     if (!connected) {
       snprintf(lastUploadError, sizeof(lastUploadError), "tls_error_%d_ram_%uk",
@@ -1476,6 +1497,7 @@ int postChunk(File &file, UploadCtx &ctx, uint32_t offset, uint32_t len,
   client->print("Content-Length: " + String(contentLength) + "\r\n");
   client->print("Connection: close\r\n\r\n");
   client->print(head);
+  unsigned long chunkStart = millis();
 
   static uint8_t buffer[4096];
   file.seek(offset);
@@ -1531,7 +1553,10 @@ int postChunk(File &file, UploadCtx &ctx, uint32_t offset, uint32_t len,
   int sp = statusLine.indexOf(' ');
   if (sp > 0)
     code = statusLine.substring(sp + 1, sp + 4).toInt();
-  Serial.printf("Chunk %u/%u -> %s\n", index + 1, total, statusLine.c_str());
+  unsigned long ms = millis() - chunkStart;
+  Serial.printf("Chunk %u/%u -> %s (%u KB/s)\n", index + 1, total,
+                statusLine.c_str(),
+                (unsigned)((uint64_t)len * 1000 / 1024 / (ms ? ms : 1)));
   return code;
 }
 
@@ -1546,6 +1571,12 @@ UploadResult uploadFile(const char *path) {
     setUploadError("still_recording");
     publishRecordingStatus("upload_failed", path, 0, 0, -1, lastUploadError);
     return UPLOAD_RETRY;
+  }
+
+  if (serverUsesTls() && getRecState().active &&
+      ESP.getMaxAllocHeap() < TLS_MIN_FREE_BLOCK) {
+    setUploadError("deferred_recording");
+    return UPLOAD_DEFERRED;
   }
 
   File file = SD.open(path, FILE_READ);
@@ -1580,8 +1611,15 @@ UploadResult uploadFile(const char *path) {
                 fileSize, totalChunks, serverUsesTls() ? "https" : "http",
                 SERVER_HOST, SERVER_PORT);
 
+  uint32_t firstChunk = 0;
+  if (strcmp(resumePath, path) == 0 && resumeOffset < fileSize) {
+    firstChunk = resumeOffset / UPLOAD_CHUNK_BYTES;
+    ctx.sent = firstChunk * UPLOAD_CHUNK_BYTES;
+    Serial.printf("Resuming from chunk %u/%u\n", firstChunk + 1, totalChunks);
+  }
+
   UploadResult result = UPLOAD_RETRY;
-  for (uint32_t i = 0; i < totalChunks; i++) {
+  for (uint32_t i = firstChunk; i < totalChunks; i++) {
     uint32_t offset = i * UPLOAD_CHUNK_BYTES;
     uint32_t len = fileSize - offset;
     if (len > UPLOAD_CHUNK_BYTES)
@@ -1590,12 +1628,24 @@ UploadResult uploadFile(const char *path) {
     int code = postChunk(file, ctx, offset, len, i, totalChunks);
     bool last = (i == totalChunks - 1);
 
+    if (code == -1) { // sedang merekam, RAM tidak cukup: lanjut nanti
+      result = UPLOAD_DEFERRED;
+      break;
+    }
+
     // Potongan tengah dijawab 200, potongan terakhir 201 (file tersimpan)
     if (code == 200 || code == 201) {
-      if (last)
+      if (last) {
         result = UPLOAD_OK;
+      } else {
+        strlcpy(resumePath, path, sizeof(resumePath));
+        resumeOffset = offset + len;
+        resumeMqttBetweenChunks();
+      }
       continue;
     }
+    if (code == 409) // server kehilangan potongan sebelumnya: ulang dari awal
+      resumePath[0] = '\0';
 
     if (code != 0) {
       char msg[24];
@@ -1618,7 +1668,13 @@ UploadResult uploadFile(const char *path) {
     Serial.println("Upload done, MQTT will reconnect");
   }
 
-  if (result == UPLOAD_OK) {
+  if (result == UPLOAD_OK || result == UPLOAD_REJECTED)
+    resumePath[0] = '\0';
+
+  if (result == UPLOAD_DEFERRED) {
+    Serial.printf("Upload of %s paused at %u%% until the recording ends\n",
+                  path, uploadProgress);
+  } else if (result == UPLOAD_OK) {
     lastUploadError[0] = '\0';
     // File TETAP disimpan di SD, hanya dipindah ke /rec/up
     moveToUploaded(path);
@@ -1741,6 +1797,12 @@ void uploadManager() {
     return;
   if ((long)(millis() - nextAutoUploadAt) < 0)
     return;
+  // Sedang merekam dan RAM tidak cukup: tunggu (dipicu lagi saat rekaman selesai)
+  if (serverUsesTls() && getRecState().active &&
+      ESP.getMaxAllocHeap() < TLS_MIN_FREE_BLOCK) {
+    nextAutoUploadAt = millis() + AUTO_UPLOAD_SCAN_MS;
+    return;
+  }
   if (!ensureSD()) {
     nextAutoUploadAt = millis() + AUTO_UPLOAD_SCAN_MS;
     return;
@@ -1759,6 +1821,8 @@ void uploadManager() {
     nextAutoUploadAt = millis() + 1000; // lanjut file berikutnya
     if (uploadAllActive)
       uploadAllOk++;
+  } else if (r == UPLOAD_DEFERRED) {
+    nextAutoUploadAt = millis() + AUTO_UPLOAD_SCAN_MS;
   } else if (r == UPLOAD_REJECTED) {
     addRejected(path);
     nextAutoUploadAt = millis() + 1000;
@@ -1793,6 +1857,15 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
 
   if (strcmp(topic, command_topic) == 0) {
     Serial.printf("Command: %s\n", action);
+    // Sesi MQTT persisten: perintah yang dikirim saat MQTT dijeda (upload)
+    // tetap sampai. Yang sudah terlalu lama diabaikan.
+    uint32_t sentAt = doc["timestamp"] | 0;
+    time_t nowTs = time(nullptr);
+    if (sentAt > 0 && nowTs > 1700000000 && (uint32_t)nowTs > sentAt + STALE_COMMAND_S) {
+      Serial.printf("Ignoring stale command %s (%u s old)\n", action,
+                    (unsigned)((uint32_t)nowTs - sentAt));
+      return;
+    }
     if (strcmp(action, "start_recording") == 0) {
       requestStartRecording(doc["duration"] | 0);
     } else if (strcmp(action, "stop_recording") == 0) {
@@ -1908,6 +1981,10 @@ void maintainConnections() {
     return;
   if (lastMqttAttempt != 0 && millis() - lastMqttAttempt < MQTT_RETRY_MS)
     return;
+  mqttConnectNow();
+}
+
+bool mqttConnectNow() {
   lastMqttAttempt = millis();
 
   // Last Will: Laravel langsung tahu device offline kalau koneksi putus
@@ -1915,9 +1992,11 @@ void maintainConnections() {
   snprintf(will, sizeof(will), "{\"device_id\":\"%s\",\"status\":\"offline\"}",
            DEVICE_ID);
 
+  // cleanSession=false + subscribe QoS 1: broker menyimpan perintah yang
+  // dikirim selama MQTT dijeda (misalnya start_recording terjadwal)
   if (mqttClient.connect(DEVICE_ID, CFG_MQTT_USER, CFG_MQTT_PASSWORD, data_topic, 0, false,
-                         will)) {
-    mqttClient.subscribe(command_topic);
+                         will, false)) {
+    mqttClient.subscribe(command_topic, 1);
     mqttClient.subscribe(control_topic);
     Serial.println("MQTT Connected");
 
@@ -1926,9 +2005,27 @@ void maintainConnections() {
     else
       publishRecordingStatus("idle");
     pendingHealth = true;
-  } else {
-    Serial.printf("MQTT connect failed, rc=%d\n", mqttClient.state());
+    return true;
   }
+  Serial.printf("MQTT connect failed, rc=%d\n", mqttClient.state());
+  return false;
+}
+
+// Di antara potongan upload: sambung MQTT sebentar supaya device tetap
+// "online" di Laravel dan perintah (mis. start_recording) diterima.
+void resumeMqttBetweenChunks() {
+  if (!mqttPausedForUpload)
+    return;
+  if (!mqttConnectNow())
+    return;
+  mqttPausedForUpload = false;
+  unsigned long t = millis();
+  while (millis() - t < 800) {
+    mqttClient.loop();
+    processRecEvents();
+    delay(10);
+  }
+  pendingHealth = true;
 }
 
 // ============================================================================
