@@ -78,7 +78,7 @@
 #endif
 #include "web_ui.h"
 
-#define FW_VERSION "4.0.1"
+#define FW_VERSION "4.0.2"
 
 // ============================================================================
 // Configuration
@@ -869,8 +869,12 @@ void publishRecordingStatus(const char *status, const char *filename = nullptr,
   if (error && error[0])
     doc["error"] = error;
   publishJson(recording_status_topic, doc);
-  Serial.printf("Recording status: %s %s %s\n", status, filename ? filename : "",
-                error ? error : "");
+  if (progress >= 0 && progress < 100)
+    Serial.printf("Recording status: %s %s %d%%\n", status,
+                  filename ? filename : "", progress);
+  else
+    Serial.printf("Recording status: %s %s %s\n", status,
+                  filename ? filename : "", error ? error : "");
 }
 
 void publishRecordingProgress() {
@@ -1370,6 +1374,21 @@ void serviceDuringUpload() {
   serviceWeb();
 }
 
+// Sesi TLS butuh satu blok RAM utuh ~40 KB. Kalau kurang, MQTT (juga TLS)
+// dijeda dulu selama upload supaya tidak perlu gagal sekali.
+#define TLS_MIN_FREE_BLOCK 48000
+
+void pauseMqttForUpload() {
+  if (!mqttClient.connected())
+    return;
+  Serial.printf("Pausing MQTT during the upload to free memory (largest block %u)\n",
+                ESP.getMaxAllocHeap());
+  mqttClient.disconnect();
+  espClient.stop();
+  mqttPausedForUpload = true;
+  delay(50);
+}
+
 void setUploadError(const char *msg) {
   strlcpy(lastUploadError, msg, sizeof(lastUploadError));
 }
@@ -1385,6 +1404,8 @@ int postChunk(File &file, UploadCtx &ctx, uint32_t offset, uint32_t len,
   if (serverUsesTls()) {
     secure.setInsecure(); // TODO: pasang root CA untuk validasi sertifikat
     client = &secure;
+    if (ESP.getMaxAllocHeap() < TLS_MIN_FREE_BLOCK)
+      pauseMqttForUpload();
   }
 
   bool connected = client->connect(SERVER_HOST, SERVER_PORT);
@@ -1401,10 +1422,7 @@ int postChunk(File &file, UploadCtx &ctx, uint32_t offset, uint32_t len,
     // Tanpa PSRAM, sesi TLS MQTT + sesi TLS upload sering tidak muat di RAM.
     // Lepas sesi MQTT selama upload, lalu coba sekali lagi.
     if (mqttClient.connected()) {
-      Serial.println("Pausing MQTT during the upload to free memory");
-      mqttClient.disconnect();
-      espClient.stop();
-      mqttPausedForUpload = true;
+      pauseMqttForUpload();
       secure.stop();
       delay(100);
       connected = secure.connect(SERVER_HOST, SERVER_PORT);
