@@ -355,8 +355,8 @@
             
             <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
                 <div class="sm:col-span-2">
-                    <label for="recording-duration" class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Duration (minutes, 0 = until stopped)</label>
-                    <input type="number" id="recording-duration" min="0" max="240" step="1" value="30"
+                    <label for="recording-duration" class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Duration (seconds, 0 = until stopped)</label>
+                    <input type="number" id="recording-duration" min="0" max="14400" step="1" value="30"
                            class="w-full px-4 py-2.5 rounded-xl border border-gray-200 dark:border-white/10 bg-white/50 dark:bg-white/5 text-gray-900 dark:text-white focus:ring-2 focus:ring-red-500 focus:border-transparent"
                            placeholder="e.g. 30">
                 </div>
@@ -1323,12 +1323,12 @@
 
         // WAV size estimate: 16000 samples/s * 2 bytes = 32000 B/s
         function updateSizeEstimate() {
-            const minutes = parseFloat(recordingDurationInput.value) || 0;
-            if (minutes <= 0) {
+            const seconds = parseFloat(recordingDurationInput.value) || 0;
+            if (seconds <= 0) {
                 recordingEstimate.textContent = 'Manual stop';
                 return;
             }
-            const mb = (minutes * 60 * 32000) / (1024 * 1024);
+            const mb = (seconds * 32000) / (1024 * 1024);
             recordingEstimate.textContent = '~' + mb.toFixed(1) + ' MB WAV';
         }
         recordingDurationInput.addEventListener('input', updateSizeEstimate);
@@ -1440,8 +1440,7 @@
         }
 
         startRecordingBtn.addEventListener('click', async () => {
-            const minutes = parseFloat(recordingDurationInput.value) || 0;
-            const durationSeconds = Math.round(minutes * 60);
+            const durationSeconds = Math.max(0, Math.round(parseFloat(recordingDurationInput.value) || 0));
 
             try {
                 const response = await fetch("{{ route('devices.record.start', $device) }}", {

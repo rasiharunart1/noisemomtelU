@@ -249,10 +249,10 @@
                     
                      <!-- Mini Recording Controls -->
                      <div class="flex items-center space-x-2">
-                        <input type="number" class="rec-duration-input w-16 px-2 py-1.5 text-xs rounded-lg border border-gray-200 dark:border-white/10 bg-white/50 dark:bg-white/5 text-gray-900 dark:text-white focus:ring-2 focus:ring-emerald-500"
-                               min="0" max="240" step="1" value="30"
-                               title="Duration in minutes (0 = until stopped)"
-                               aria-label="Recording duration in minutes">
+                        <input type="number" class="rec-duration-input w-20 px-2 py-1.5 text-xs rounded-lg border border-gray-200 dark:border-white/10 bg-white/50 dark:bg-white/5 text-gray-900 dark:text-white focus:ring-2 focus:ring-emerald-500"
+                               min="0" max="14400" step="1" value="30"
+                               title="Duration in seconds (0 = until stopped, max 14400)"
+                               aria-label="Recording duration in seconds">
                         <button class="btn-start-rec p-2 bg-emerald-500/10 text-emerald-600 rounded-lg hover:bg-emerald-500 hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                 title="Start Recording"
                                 data-device-id="{{ $device->device_id }}"
@@ -772,8 +772,7 @@
                 // The button itself carries data-device-id, so look up the card explicitly
                 const card = btn.closest('.glass-card');
                 const durationInput = card ? card.querySelector('.rec-duration-input') : null;
-                const minutes = durationInput ? (parseFloat(durationInput.value) || 0) : 0;
-                const durationSeconds = Math.round(minutes * 60);
+                const durationSeconds = durationInput ? Math.max(0, Math.round(parseFloat(durationInput.value) || 0)) : 0;
 
                 // Optimistic UI update
                 updateRecordingState(mqttId, true, true);
