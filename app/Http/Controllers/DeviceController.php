@@ -196,10 +196,14 @@ class DeviceController extends Controller
     public function startRecording(Request $request, Device $device)
     {
         $validated = $request->validate([
-            'duration' => 'nullable|integer|min:5|max:14400', // seconds, up to 4 hours
+            // seconds, up to 4 hours; 0 = until stopped (the UI says so)
+            'duration' => 'nullable|integer|min:0|max:14400',
         ]);
 
         $duration = (int) ($validated['duration'] ?? 0);
+        if ($duration > 0 && $duration < 5) {
+            $duration = 5;
+        }
 
         return $this->sendCommand($device, 'start_recording', [
             'duration' => $duration,

@@ -769,7 +769,8 @@
             btn.addEventListener('click', async (e) => {
                 const deviceId = btn.dataset.deviceUuid; // Ensure this is UUID for route
                 const mqttId = btn.dataset.deviceId;
-                const card = btn.closest('[data-device-id]');
+                // The button itself carries data-device-id, so look up the card explicitly
+                const card = btn.closest('.glass-card');
                 const durationInput = card ? card.querySelector('.rec-duration-input') : null;
                 const minutes = durationInput ? (parseFloat(durationInput.value) || 0) : 0;
                 const durationSeconds = Math.round(minutes * 60);
@@ -778,17 +779,23 @@
                 updateRecordingState(mqttId, true, true);
 
                 try {
-                    await fetch(`/devices/${deviceId}/record/start`, {
+                    const response = await fetch(`/devices/${deviceId}/record/start`, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
+                            'Accept': 'application/json',
                             'X-CSRF-TOKEN': '{{ csrf_token() }}'
                         },
                         body: JSON.stringify({ duration: durationSeconds })
                     });
+                    const result = await response.json().catch(() => ({}));
+                    if (!response.ok || !result.success) {
+                        throw new Error(result.message || ('HTTP ' + response.status));
+                    }
                 } catch (err) {
                     console.error('Failed to start recording', err);
                     updateRecordingState(mqttId, false, true); // Revert on fail
+                    alert('Failed to start recording: ' + err.message);
                 }
             });
         });

@@ -1465,9 +1465,12 @@
                         progressTime.textContent = '00:00 / manual';
                         progressBar.style.width = '100%';
                     }
+                } else {
+                    alert('Failed to start recording: ' + (result.message || ('HTTP ' + response.status)));
                 }
             } catch (err) {
                 console.error('Failed to start recording:', err);
+                alert('Failed to start recording: ' + err.message);
             }
         });
 
